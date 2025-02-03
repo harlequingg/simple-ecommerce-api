@@ -1,64 +1,99 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 )
 
 type Config struct {
-	port int
+	port        int
+	environment string
+	db          struct {
+		dsn string
+	}
 }
 
 type Application struct {
-	config Config
+	config  Config
+	storage *Storage
 }
 
 const (
-	version     = "1.0.0"
-	environment = "development"
+	version = "1.0.0"
 )
-
-func (app *Application) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	res := struct {
-		Version     string `json:"version"`
-		Environment string `json:"env"`
-	}{Version: version, Environment: environment}
-	data, err := json.Marshal(res)
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(data)
-}
 
 func main() {
 	var cfg Config
-	p, _ := strconv.Atoi(os.Getenv("PORT"))
-	flag.IntVar(&cfg.port, "port", p, "Listen port of the Server")
 
-	app := &Application{
-		config: cfg,
+	defaultPort, err := strconv.Atoi(os.Getenv("PORT"))
+	if err != nil {
+		defaultPort = 8080
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/healthcheck", app.healthCheckHandler)
+	defaultEnv := os.Getenv("ENV")
+	if defaultEnv == "" {
+		defaultEnv = "development"
+	}
+
+	flag.IntVar(&cfg.port, "port", defaultPort, "Listen port of the Server")
+	flag.StringVar(&cfg.environment, "env", defaultEnv, `Environment ("development" or "production")`)
+	flag.StringVar(&cfg.db.dsn, "db-dsn", os.Getenv("DB_DSN"), "Database DSN")
+	flag.Parse()
+
+	storage, err := NewStorage(cfg.db.dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("Connected to database")
+
+	app := &Application{
+		config:  cfg,
+		storage: storage,
+	}
 
 	srv := http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.port),
-		Handler:      mux,
+		Handler:      ComposeRoutes(app),
 		IdleTimeout:  time.Minute,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
 
-	err := srv.ListenAndServe()
+	quit := make(chan error)
+
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		err := srv.Shutdown(ctx)
+		quit <- err
+	}()
+
+	log.Printf("Starting server on port: %d\n", cfg.port)
+
+	err = srv.ListenAndServe()
+	if err != nil {
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}
+
+	err = <-quit
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	log.Println("Server was shutdown gracefully")
 }
