@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base32"
 	"errors"
 	"time"
 
@@ -128,6 +131,71 @@ func (s *Storage) DeleteUser(u *User) error {
 	defer cancel()
 
 	args := []any{u.ID}
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *Storage) CreateToken(userID int64, duration time.Duration, scope TokenScope) (*Token, error) {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		return nil, err
+	}
+
+	text := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)
+	hash := sha256.Sum256([]byte(text))
+	expires_at := time.Now().Add(duration)
+	query := `INSERT INTO tokens(hash, user_id, expires_at, scope)
+			  VALUES ($1, $2, $3, $4)
+			  RETURNING id`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	t := &Token{
+		Text:      text,
+		Hash:      hash[:],
+		ExpiresAt: expires_at,
+		UserID:    userID,
+		Scope:     scope,
+	}
+
+	args := []any{hash[:], userID, expires_at, scope}
+	err = s.db.QueryRowContext(ctx, query, args...).Scan(&t.ID)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func (s *Storage) GetUserFromToken(text string, scope TokenScope) (*User, error) {
+	hash := sha256.Sum256([]byte(text))
+	query := `SELECT users.id, users.created_at, users.name, users.email, users.password_hash, users.is_activated, users.version
+			  FROM users
+			  INNER JOIN tokens
+			  on users.id = tokens.user_id
+			  WHERE tokens.hash = $1 AND tokens.scope = $2 AND tokens.expires_at > $3`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var u User
+
+	args := []any{hash[:], scope, time.Now()}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Version)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *Storage) DeleteAllTokensForUser(userID int64, scope TokenScope) error {
+	query := `DELETE FROM tokens
+			  WHERE user_id = $1 AND scope = $2`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{userID, scope}
 	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }

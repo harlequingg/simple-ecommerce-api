@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -16,7 +17,7 @@ func (app *Application) healthCheckHandler(w http.ResponseWriter, r *http.Reques
 		Version     string `json:"version"`
 		Environment string `json:"env"`
 	}{Version: version, Environment: app.config.environment}
-	writeJSON(res, w)
+	writeJSON(res, http.StatusOK, w)
 }
 
 func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +52,7 @@ func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request
 		writeError(err, http.StatusInternalServerError, w)
 		return
 	}
-	writeJSON(u, w)
+	writeJSON(u, http.StatusCreated, w)
 }
 
 func (app *Application) getUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +70,7 @@ func (app *Application) getUserHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(errors.New("not found"), http.StatusNotFound, w)
 		return
 	}
-	writeJSON(u, w)
+	writeJSON(u, http.StatusOK, w)
 }
 
 func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -137,7 +138,7 @@ func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
 	}
-	writeJSON(u, w)
+	writeJSON(u, http.StatusOK, w)
 }
 
 func (app *Application) deleteUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +162,52 @@ func (app *Application) deleteUserHandler(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func (app *Application) createAuthenticationTokenHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	err := readJSON(r, &req)
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+
+	v := NewValidator()
+	v.CheckEmail(req.Email)
+	v.CheckPassword(req.Password)
+	if v.HasError() {
+		writeError(v, http.StatusBadRequest, w)
+		return
+	}
+
+	u, err := app.storage.GetUserByEmail(req.Email)
+	if err != nil {
+		writeError(err, http.StatusInternalServerError, w)
+		return
+	}
+
+	if u == nil {
+		writeError(errors.New("invalid credentials"), http.StatusUnauthorized, w)
+		return
+	}
+
+	err = bcrypt.CompareHashAndPassword(u.PasswordHash, []byte(req.Password))
+	if err != nil {
+		writeError(errors.New("invalid credentials"), http.StatusUnauthorized, w)
+		return
+	}
+
+	token, err := app.storage.CreateToken(u.ID, 24*time.Hour, ScopeAuthentication)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
+	writeJSON(token, http.StatusCreated, w)
+}
+
 func readJSON(r *http.Request, dst any) error {
 	err := json.NewDecoder(r.Body).Decode(dst)
 	if err != nil {
@@ -170,8 +217,9 @@ func readJSON(r *http.Request, dst any) error {
 	return nil
 }
 
-func writeJSON(src any, w http.ResponseWriter) {
+func writeJSON(src any, status int, w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	var b bytes.Buffer
 	err := json.NewEncoder(&b).Encode(src)
 	if err != nil {
