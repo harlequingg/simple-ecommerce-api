@@ -34,8 +34,8 @@ func NewStorage(connStr string) (*Storage, error) {
 	return &Storage{db: db}, nil
 }
 
-func (s *Storage) CreateUser(name, email string, password []byte) (*User, error) {
-	query := `INSERT INTO users(name, email, password, is_activated)
+func (s *Storage) CreateUser(name, email string, passwordHash []byte) (*User, error) {
+	query := `INSERT INTO users(name, email, password_hash, is_activated)
 	          VALUES ($1, $2, $3, $4)
 			  RETURNING id, created_at, version`
 
@@ -45,11 +45,11 @@ func (s *Storage) CreateUser(name, email string, password []byte) (*User, error)
 	u := User{}
 	u.Name = name
 	u.Email = email
-	u.Password = password
+	u.PasswordHash = passwordHash
 	u.IsActivated = false
 
-	args := []any{u.Name, u.Email, u.Password, u.IsActivated}
-	err := s.db.QueryRowContext(ctx, query, args).Scan(&u.ID, &u.CreatedAt, &u.Version)
+	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Version)
 	if err != nil {
 		return nil, err
 	}
@@ -57,8 +57,31 @@ func (s *Storage) CreateUser(name, email string, password []byte) (*User, error)
 	return &u, nil
 }
 
+func (s *Storage) GetUserById(id int64) (*User, error) {
+	query := `SELECT created_at, name, email, password_hash, is_activated, version
+			  FROM users
+			  WHERE id = $1`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	u := User{}
+	u.ID = id
+
+	args := []any{u.ID}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Version)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &u, nil
+}
+
 func (s *Storage) GetUserByEmail(email string) (*User, error) {
-	query := `SELECT id, created_at, name, password, is_activated, version
+	query := `SELECT id, created_at, name, password_hash, is_activated, version
 			  FROM users
 			  WHERE email = $1`
 
@@ -69,7 +92,7 @@ func (s *Storage) GetUserByEmail(email string) (*User, error) {
 	u.Email = email
 
 	args := []any{u.Email}
-	err := s.db.QueryRowContext(ctx, query, args).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.Password, &u.Version)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.PasswordHash, &u.IsActivated, &u.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -82,15 +105,15 @@ func (s *Storage) GetUserByEmail(email string) (*User, error) {
 
 func (s *Storage) UpdateUser(u *User) error {
 	query := `UPDATE users
-			  SET name = $1, email = $2, password = $3, is_activated = $4, version = version + 1  
+			  SET name = $1, email = $2, password_hash = $3, is_activated = $4, version = version + 1  
 			  WHERE id = $5 AND version = $6 
-			  RETURING version`
+			  RETURNING version`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	args := []any{u.Name, u.Email, u.Password, u.IsActivated}
-	err := s.db.QueryRowContext(ctx, query, args).Scan(&u.Version)
+	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated, u.ID, u.Version}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.Version)
 	if err != nil {
 		return err
 	}
@@ -104,6 +127,7 @@ func (s *Storage) DeleteUser(u *User) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := s.db.ExecContext(ctx, query, u.ID)
+	args := []any{u.ID}
+	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }

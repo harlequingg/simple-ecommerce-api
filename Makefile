@@ -16,4 +16,4 @@ migrate_up:
 
 .PHONY: migrate_down
 migrate_down:
-	@migrate -path=./migrations -database=${DB_DSN} -verbose down
+	@migrate -path=./migrations -database=${DB_DSN} -verbose down 1

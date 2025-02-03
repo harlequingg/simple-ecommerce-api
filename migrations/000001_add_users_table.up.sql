@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at timestamp(0) with time zone NOT NULL DEFAULT NOW(),
     name varchar(50) NOT NULL,
     email citext UNIQUE NOT NULL,
-    password bytea NOT NULL,
+    password_hash bytea NOT NULL,
     is_activated boolean NOT NULL,
     version integer NOT NULL DEFAULT 1
 );
