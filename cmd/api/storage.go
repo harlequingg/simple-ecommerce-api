@@ -7,9 +7,12 @@ import (
 	"database/sql"
 	"encoding/base32"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/shopspring/decimal"
 )
 
 type Storage struct {
@@ -208,5 +211,121 @@ func (s *Storage) DeleteExpiredTokens() error {
 	defer cancel()
 
 	_, err := s.db.ExecContext(ctx, query)
+	return err
+}
+
+func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, amount int64, sellerID int64) (*Product, error) {
+	query := `INSERT INTO products(name, description, price_in_dollars, amount_in_stock, seller_id)
+			  VALUES ($1, $2, $3, $4, $5)
+			  RETURNING id, created_at, updated_at, version`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	p := Product{
+		Name:        name,
+		Description: description,
+		Price:       price,
+		Amount:      amount,
+		SellerID:    sellerID,
+	}
+
+	args := []any{name, description, price, amount, sellerID}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Version)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Storage) GetProductByID(id int64) (*Product, error) {
+	query := `SELECT created_at, updated_at, name, description, price_in_dollars, amount_in_stock, seller_id, version
+			  FROM products
+			  WHERE id = $1`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{id}
+	p := Product{
+		ID: id,
+	}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.SellerID, &p.Version)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice decimal.Decimal, page, pageSize int) ([]Product, int, error) {
+	op := "ASC"
+	column := sort
+	if strings.HasPrefix(sort, "-") {
+		column = strings.TrimPrefix(sort, "-")
+		op = "DESC"
+	}
+	sortStr := fmt.Sprintf("%s %s", column, op)
+	if column != "id" {
+		sortStr = fmt.Sprintf("%s %s, id ASC", column, op)
+	}
+	query := fmt.Sprintf(`SELECT COUNT(*) OVER(), id, created_at, updated_at, name, description, price_in_dollars, amount_in_stock, seller_id, version
+			  FROM products
+			  WHERE ($1 = '' OR to_tsvector('simple', name) @@ plainto_tsquery('simple', $1))
+			  AND ($2 = '' OR to_tsvector('simple', description) @@ plainto_tsquery('simple', $2))
+			  AND (price_in_dollars BETWEEN $3 AND $4)
+			  ORDER BY %s
+			  LIMIT $5 OFFSET $6`, sortStr)
+	limit := pageSize
+	offset := (page - 1) * pageSize
+	args := []any{name, description, minPrice, maxPrice, limit, offset}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	total := 0
+	products := make([]Product, 0)
+	for rows.Next() {
+		p := Product{}
+		err := rows.Scan(&total, &p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.SellerID, &p.Version)
+		if err != nil {
+			return nil, 0, err
+		}
+		products = append(products, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return products, total, nil
+}
+
+func (s *Storage) UpdateProduct(p *Product) error {
+	query := `UPDATE products
+	          SET name = $1, description = $2, price_in_dollars = $3, amount_in_stock = $4, updated_at = NOW(), version = version + 1
+			  WHERE id = $5 AND version = $6
+			  RETURNING version`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{p.Name, p.Description, p.Price, p.Amount, p.ID, p.Version}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.Version)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Storage) DeleteProduct(p *Product) error {
+	query := `DELETE FROM products
+			  WHERE id = $1`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{p.ID}
+	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }

@@ -14,5 +14,11 @@ func ComposeRoutes(app *Application) http.Handler {
 
 	mux.HandleFunc("POST /v1/tokens/authentication", app.createAuthenticationTokenHandler)
 
+	mux.HandleFunc("POST /v1/products", app.authenticate(app.createProductHandler))
+	mux.HandleFunc("GET /v1/products", app.getProductsHandler)
+	mux.HandleFunc("GET /v1/products/{id}", app.getProductHandler)
+	mux.HandleFunc("PUT /v1/products/{id}", app.authenticate(app.updateProductHandler))
+	mux.HandleFunc("DELETE /v1/products/{id}", app.authenticate(app.deleteProductHandler))
+
 	return mux
 }

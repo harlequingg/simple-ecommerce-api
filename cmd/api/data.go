@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	"github.com/shopspring/decimal"
+)
 
 type User struct {
 	ID           int64     `json:"id"`
@@ -25,4 +29,16 @@ type Token struct {
 	UserID    int64      `json:"-"`
 	ExpiresAt time.Time  `json:"expiry"`
 	Scope     TokenScope `json:"-"`
+}
+
+type Product struct {
+	ID          int64           `json:"id"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Price       decimal.Decimal `json:"price"`
+	Amount      int64           `json:"amount"`
+	SellerID    int64           `json:"seller_id"`
+	Version     int64           `json:"-"`
 }
