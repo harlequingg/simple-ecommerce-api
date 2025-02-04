@@ -20,5 +20,12 @@ func ComposeRoutes(app *Application) http.Handler {
 	mux.HandleFunc("PUT /v1/products/{id}", app.authenticate(app.updateProductHandler))
 	mux.HandleFunc("DELETE /v1/products/{id}", app.authenticate(app.deleteProductHandler))
 
+	mux.HandleFunc("POST /v1/cart", app.authenticate(app.createCartItemHandler))
+	mux.HandleFunc("GET /v1/cart", app.authenticate(app.getCartItems))
+	mux.HandleFunc("GET /v1/cart/{id}", app.authenticate(app.getCartItem))
+	mux.HandleFunc("PUT /v1/cart/{id}", app.authenticate(app.updateCartItem))
+	mux.HandleFunc("DELETE /v1/cart", app.authenticate(app.deleteCartItems))
+	mux.HandleFunc("DELETE /v1/cart/{id}", app.authenticate(app.deleteCartItem))
+
 	return mux
 }

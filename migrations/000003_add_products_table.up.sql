@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS products (
     description text NOT NULL,
     price_in_dollars decimal(19, 2) NOT NULL,
     amount_in_stock integer NOT NULL,
-    seller_id integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    seller_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     version integer NOT NULL DEFAULT 1
 );
 

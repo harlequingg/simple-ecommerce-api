@@ -204,7 +204,7 @@ func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	p, err := app.storage.CreateProduct(req.Name, req.Description, req.Price, int64(req.Amount), u.ID)
+	p, err := app.storage.CreateProduct(req.Name, req.Description, req.Price, int32(req.Amount), u.ID)
 	if err != nil {
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
@@ -384,7 +384,7 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 		p.Price = *req.Price
 	}
 	if req.Amount != nil {
-		p.Amount = int64(*req.Amount)
+		p.Amount = int32(*req.Amount)
 	}
 	err = app.storage.UpdateProduct(p)
 	if err != nil {
@@ -430,7 +430,189 @@ func (app *Application) deleteProductHandler(w http.ResponseWriter, r *http.Requ
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
 	}
-	writeJSON(map[string]any{"message": "resource delete successfully"}, http.StatusOK, w)
+	writeJSON(map[string]any{"message": "resource deleted successfully"}, http.StatusOK, w)
+}
+
+func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProductID int64 `json:"product_id"`
+		Amount    int32 `json:"amount"`
+	}
+	err := readJSON(r, &req)
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+
+	v := NewValidator()
+	v.Check(req.ProductID > 0, "product_id", "must be greater than zero")
+	v.Check(req.Amount > 0, "amount", "must be greater than zero")
+
+	if v.HasError() {
+		writeError(v, http.StatusBadRequest, w)
+		return
+	}
+
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
+	cartItem, err := app.storage.CreateCartItem(req.ProductID, u.ID, req.Amount)
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	writeJSON(cartItem, http.StatusCreated, w)
+}
+
+func (app *Application) getCartItem(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	if id < 0 {
+		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		return
+	}
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	item, err := app.storage.GetCartItemById(int64(id))
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if item == nil {
+		writeError(errors.New("not found"), http.StatusNotFound, w)
+		return
+	}
+	if item.UserID != u.ID {
+		writeError(errors.New("access denied"), http.StatusForbidden, w)
+		return
+	}
+	writeJSON(item, http.StatusOK, w)
+}
+
+func (app *Application) getCartItems(w http.ResponseWriter, r *http.Request) {
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	items, err := app.storage.GetCartItems(int64(u.ID))
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	writeJSON(map[string]any{"items": items}, http.StatusOK, w)
+}
+
+func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	if id < 0 {
+		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		return
+	}
+	var req struct {
+		Amount *int32 `json:"amount"`
+	}
+	err = readJSON(r, &req)
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	v := NewValidator()
+	v.Check(req.Amount != nil, "amount", "must be provided")
+	v.Check(*req.Amount > 0, "amount", "must be greater than zero")
+	if v.HasError() {
+		writeError(v, http.StatusBadRequest, w)
+		return
+	}
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	item, err := app.storage.GetCartItemById(int64(id))
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if item == nil {
+		writeError(errors.New("not found"), http.StatusNotFound, w)
+		return
+	}
+	if item.UserID != u.ID {
+		writeError(errors.New("access denied"), http.StatusForbidden, w)
+		return
+	}
+	item.Amount = *req.Amount
+	err = app.storage.UpdateCartItem(item)
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	writeJSON(item, http.StatusOK, w)
+}
+
+func (app *Application) deleteCartItem(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	if id < 0 {
+		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		return
+	}
+
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	item, err := app.storage.GetCartItemById(int64(id))
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if item == nil {
+		writeError(errors.New("not found"), http.StatusNotFound, w)
+		return
+	}
+	if item.UserID != u.ID {
+		writeError(errors.New("access denied"), http.StatusForbidden, w)
+		return
+	}
+	err = app.storage.DeleteCartItem(item)
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	writeJSON(map[string]any{"message": "resource deleted successfully"}, http.StatusOK, w)
+}
+
+func (app *Application) deleteCartItems(w http.ResponseWriter, r *http.Request) {
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	err := app.storage.DeleteCartItems(u.ID)
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	writeJSON(map[string]any{"message": "resources deleted successfully"}, http.StatusOK, w)
 }
 
 func readJSON(r *http.Request, dst any) error {

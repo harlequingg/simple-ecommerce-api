@@ -13,7 +13,7 @@ type User struct {
 	Email        string    `json:"email"`
 	PasswordHash []byte    `json:"-"`
 	IsActivated  bool      `json:"is_activated"`
-	Version      int64     `json:"-"`
+	Version      int32     `json:"-"`
 }
 
 type TokenScope string
@@ -38,7 +38,15 @@ type Product struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Price       decimal.Decimal `json:"price"`
-	Amount      int64           `json:"amount"`
+	Amount      int32           `json:"amount"`
 	SellerID    int64           `json:"seller_id"`
-	Version     int64           `json:"-"`
+	Version     int32           `json:"-"`
+}
+
+type CartItem struct {
+	ID        int64 `json:"id"`
+	ProductID int64 `json:"product_id"`
+	UserID    int64 `json:"-"`
+	Amount    int32 `json:"amount"`
+	Version   int32 `json:"-"`
 }

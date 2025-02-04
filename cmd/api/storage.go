@@ -214,7 +214,7 @@ func (s *Storage) DeleteExpiredTokens() error {
 	return err
 }
 
-func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, amount int64, sellerID int64) (*Product, error) {
+func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, amount int32, sellerID int64) (*Product, error) {
 	query := `INSERT INTO products(name, description, price_in_dollars, amount_in_stock, seller_id)
 			  VALUES ($1, $2, $3, $4, $5)
 			  RETURNING id, created_at, updated_at, version`
@@ -286,7 +286,7 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 	}
 	defer rows.Close()
 	total := 0
-	products := make([]Product, 0)
+	products := []Product{}
 	for rows.Next() {
 		p := Product{}
 		err := rows.Scan(&total, &p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.SellerID, &p.Version)
@@ -328,4 +328,113 @@ func (s *Storage) DeleteProduct(p *Product) error {
 	args := []any{p.ID}
 	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
+}
+
+func (s *Storage) CreateCartItem(productID int64, userID int64, amount int32) (*CartItem, error) {
+	query := `INSERT INTO cart_items(product_id, user_id, amount)
+			  VALUES ($1, $2, $3)
+			  RETURNING id`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{productID, userID, amount}
+	c := CartItem{
+		ProductID: productID,
+		UserID:    userID,
+		Amount:    amount,
+	}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&c.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (s *Storage) GetCartItemById(cartItemID int64) (*CartItem, error) {
+	query := `SELECT product_id, user_id, amount, version
+			  FROM cart_items
+			  WHERE id = $1`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{cartItemID}
+	item := CartItem{
+		ID: cartItemID,
+	}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&item.ProductID, &item.UserID, &item.Amount, &item.Version)
+	if err != nil {
+		return nil, err
+	}
+
+	return &item, err
+}
+
+func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
+	query := `SELECT id, product_id, amount, version
+			  FROM cart_items
+			  WHERE user_id = $1`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{userID}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	cartItems := []CartItem{}
+	for rows.Next() {
+		item := CartItem{
+			UserID: userID,
+		}
+		err := rows.Scan(&item.ID, &item.ProductID, &item.Amount, &item.Version)
+		if err != nil {
+			return nil, err
+		}
+		cartItems = append(cartItems, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return cartItems, nil
+}
+
+func (s *Storage) UpdateCartItem(cartItem *CartItem) error {
+	query := `UPDATE cart_items
+			  SET amount = $1 AND version = version + 1
+			  WHERE id = $2 AND version = $3
+			  RETURNING version`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := []any{cartItem.Amount, cartItem.ID, cartItem.Version}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&cartItem.Version)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Storage) DeleteCartItem(cartItem *CartItem) error {
+	query := `DELETE FROM cart_items
+			  WHERE id = $1`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := []any{cartItem.ID}
+	_, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Storage) DeleteCartItems(userID int64) error {
+	query := `DELETE FROM cart_items
+			  WHERE user_id = $1`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := []any{userID}
+	_, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	return nil
 }
