@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -56,30 +55,11 @@ func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request
 }
 
 func (app *Application) getUserHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	u, err := app.storage.GetUserById(int64(id))
-	if err != nil {
-		writeError(err, http.StatusInternalServerError, w)
-		return
-	}
-	if u == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
-		return
-	}
+	u := getUserFromRequest(r)
 	writeJSON(u, http.StatusOK, w)
 }
 
 func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-
 	var req struct {
 		Name     *string `json:"name"`
 		Email    *string `json:"email"`
@@ -107,22 +87,16 @@ func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	u, err := app.storage.GetUserById(int64(id))
-	if err != nil {
-		writeError(err, http.StatusInternalServerError, w)
-		return
-	}
-	if u == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
-		return
-	}
+	u := getUserFromRequest(r)
 
 	if req.Name != nil {
 		u.Name = *req.Name
 	}
+
 	if req.Email != nil {
 		u.Email = *req.Email
 	}
+
 	if req.Password != nil {
 		passwordHash, err := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
 		if err != nil {
@@ -132,7 +106,7 @@ func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request
 		u.PasswordHash = passwordHash
 	}
 
-	err = app.storage.UpdateUser(u)
+	err := app.storage.UpdateUser(u)
 	if err != nil {
 		log.Println(err)
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
@@ -142,21 +116,8 @@ func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request
 }
 
 func (app *Application) deleteUserHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
-	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	u, err := app.storage.GetUserById(int64(id))
-	if err != nil {
-		writeError(err, http.StatusInternalServerError, w)
-		return
-	}
-	if u == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
-		return
-	}
-	err = app.storage.DeleteUser(u)
+	u := getUserFromRequest(r)
+	err := app.storage.DeleteUser(u)
 	if err != nil {
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 	}

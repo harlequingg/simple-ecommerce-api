@@ -70,15 +70,30 @@ func main() {
 	}
 
 	quit := make(chan error)
+	done := make(chan struct{})
 
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
+		close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		err := srv.Shutdown(ctx)
 		quit <- err
+	}()
+
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		for {
+			select {
+			case <-done:
+				log.Println("Tokens background goroutine was shutdown gracefully")
+				return
+			case <-ticker.C:
+				app.storage.DeleteExpiredTokens()
+			}
+		}
 	}()
 
 	log.Printf("Starting server on port: %d\n", cfg.port)
@@ -95,5 +110,6 @@ func main() {
 		log.Fatal(err)
 	}
 
+	close(quit)
 	log.Println("Server was shutdown gracefully")
 }

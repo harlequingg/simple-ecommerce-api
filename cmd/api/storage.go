@@ -170,17 +170,17 @@ func (s *Storage) CreateToken(userID int64, duration time.Duration, scope TokenS
 
 func (s *Storage) GetUserFromToken(text string, scope TokenScope) (*User, error) {
 	hash := sha256.Sum256([]byte(text))
-	query := `SELECT users.id, users.created_at, users.name, users.email, users.password_hash, users.is_activated, users.version
-			  FROM users
-			  INNER JOIN tokens
-			  on users.id = tokens.user_id
-			  WHERE tokens.hash = $1 AND tokens.scope = $2 AND tokens.expires_at > $3`
+	query := `SELECT u.id, u.created_at, u.name, u.email, u.password_hash, u.is_activated, u.version
+			  FROM users as u
+			  INNER JOIN tokens as t
+			  on u.id = t.user_id
+			  WHERE t.hash = $1 AND t.scope = $2 AND t.expires_at > NOW()`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var u User
 
-	args := []any{hash[:], scope, time.Now()}
+	args := []any{hash[:], scope}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Version)
 	if err != nil {
 		return nil, err
@@ -188,7 +188,7 @@ func (s *Storage) GetUserFromToken(text string, scope TokenScope) (*User, error)
 	return &u, nil
 }
 
-func (s *Storage) DeleteAllTokensForUser(userID int64, scope TokenScope) error {
+func (s *Storage) DeleteTokensForUser(userID int64, scope TokenScope) error {
 	query := `DELETE FROM tokens
 			  WHERE user_id = $1 AND scope = $2`
 
@@ -197,5 +197,16 @@ func (s *Storage) DeleteAllTokensForUser(userID int64, scope TokenScope) error {
 
 	args := []any{userID, scope}
 	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *Storage) DeleteExpiredTokens() error {
+	query := `DELETE FROM tokens
+			  WHERE NOW() > expires_at`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := s.db.ExecContext(ctx, query)
 	return err
 }
