@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -459,11 +460,25 @@ func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cartItem, err := app.storage.CreateCartItem(req.ProductID, u.ID, req.Amount)
+	p, err := app.storage.GetProductByID(req.ProductID)
 	if err != nil {
+		log.Println(err)
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
 	}
+
+	if p == nil {
+		writeError(fmt.Errorf("product with id: %d doesn't exist", req.ProductID), http.StatusInternalServerError, w)
+		return
+	}
+
+	cartItem, err := app.storage.CreateCartItem(req.ProductID, u.ID, req.Amount)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
 	writeJSON(cartItem, http.StatusCreated, w)
 }
 
@@ -544,6 +559,7 @@ func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := app.storage.GetCartItemById(int64(id))
 	if err != nil {
+		log.Println(err)
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
 	}
@@ -558,6 +574,7 @@ func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
 	item.Amount = *req.Amount
 	err = app.storage.UpdateCartItem(item)
 	if err != nil {
+		log.Println(err)
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
 	}
