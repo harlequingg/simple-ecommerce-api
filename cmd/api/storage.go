@@ -214,9 +214,9 @@ func (s *Storage) DeleteExpiredTokens() error {
 	return err
 }
 
-func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, amount int32, sellerID int64) (*Product, error) {
-	query := `INSERT INTO products(name, description, price_in_dollars, amount_in_stock, seller_id)
-			  VALUES ($1, $2, $3, $4, $5)
+func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, amount int32) (*Product, error) {
+	query := `INSERT INTO products(name, description, price, amount)
+			  VALUES ($1, $2, $3, $4)
 			  RETURNING id, created_at, updated_at, version`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -227,10 +227,9 @@ func (s *Storage) CreateProduct(name, description string, price decimal.Decimal,
 		Description: description,
 		Price:       price,
 		Amount:      amount,
-		SellerID:    sellerID,
 	}
 
-	args := []any{name, description, price, amount, sellerID}
+	args := []any{name, description, price, amount}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Version)
 	if err != nil {
 		return nil, err
@@ -239,7 +238,7 @@ func (s *Storage) CreateProduct(name, description string, price decimal.Decimal,
 }
 
 func (s *Storage) GetProductByID(id int64) (*Product, error) {
-	query := `SELECT created_at, updated_at, name, description, price_in_dollars, amount_in_stock, seller_id, version
+	query := `SELECT created_at, updated_at, name, description, price, amount, version
 			  FROM products
 			  WHERE id = $1`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -249,7 +248,7 @@ func (s *Storage) GetProductByID(id int64) (*Product, error) {
 	p := Product{
 		ID: id,
 	}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.SellerID, &p.Version)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -270,11 +269,11 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 	if column != "id" {
 		sortStr = fmt.Sprintf("%s %s, id ASC", column, op)
 	}
-	query := fmt.Sprintf(`SELECT COUNT(*) OVER(), id, created_at, updated_at, name, description, price_in_dollars, amount_in_stock, seller_id, version
+	query := fmt.Sprintf(`SELECT COUNT(*) OVER(), id, created_at, updated_at, name, description, price, amount, version
 			  FROM products
 			  WHERE ($1 = '' OR to_tsvector('simple', name) @@ plainto_tsquery('simple', $1))
 			  AND ($2 = '' OR to_tsvector('simple', description) @@ plainto_tsquery('simple', $2))
-			  AND (price_in_dollars BETWEEN $3 AND $4)
+			  AND (price BETWEEN $3 AND $4)
 			  ORDER BY %s
 			  LIMIT $5 OFFSET $6`, sortStr)
 	limit := pageSize
@@ -289,7 +288,7 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 	products := []Product{}
 	for rows.Next() {
 		p := Product{}
-		err := rows.Scan(&total, &p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.SellerID, &p.Version)
+		err := rows.Scan(&total, &p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.Version)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -303,7 +302,7 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 
 func (s *Storage) UpdateProduct(p *Product) error {
 	query := `UPDATE products
-	          SET name = $1, description = $2, price_in_dollars = $3, amount_in_stock = $4, updated_at = NOW(), version = version + 1
+	          SET name = $1, description = $2, price = $3, amount = $4, updated_at = NOW(), version = version + 1
 			  WHERE id = $5 AND version = $6
 			  RETURNING version`
 
@@ -390,6 +389,37 @@ func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
 			UserID: userID,
 		}
 		err := rows.Scan(&item.ID, &item.ProductID, &item.Amount, &item.Version)
+		if err != nil {
+			return nil, err
+		}
+		cartItems = append(cartItems, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return cartItems, nil
+}
+
+func (s *Storage) GetCartItemsForCheckout(userID int64) ([]CartItemCheckout, error) {
+	query := `SELECT c.id, c.amount, c.version, p.id, p.name, p.price, p.amount, p.version 
+			  FROM cart_items as c
+			  INNER JOIN products as p
+			  ON c.product_id = p.id
+			  WHERE c.user_id = $1
+			  ORDER BY c.id ASC`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{userID}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	cartItems := []CartItemCheckout{}
+	for rows.Next() {
+		item := CartItemCheckout{}
+		p := &item.Product
+		err := rows.Scan(&item.ID, &item.Amount, &item.Version, &p.ID, &p.Name, &p.Price, &p.Amount, &p.Version)
 		if err != nil {
 			return nil, err
 		}

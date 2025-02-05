@@ -5,6 +5,9 @@ import "net/http"
 func ComposeRoutes(app *Application) http.Handler {
 	mux := http.NewServeMux()
 
+	fs := http.FileServer(http.Dir("./public"))
+	mux.Handle("GET /static/", http.StripPrefix("/static/", fs))
+
 	mux.HandleFunc("GET /v1/healthcheck", app.healthCheckHandler)
 
 	mux.HandleFunc("POST /v1/users", app.createUserHandler)
@@ -26,6 +29,8 @@ func ComposeRoutes(app *Application) http.Handler {
 	mux.HandleFunc("PUT /v1/cart/{id}", app.authenticate(app.updateCartItem))
 	mux.HandleFunc("DELETE /v1/cart", app.authenticate(app.deleteCartItems))
 	mux.HandleFunc("DELETE /v1/cart/{id}", app.authenticate(app.deleteCartItem))
+
+	mux.HandleFunc("POST /v1/checkout", app.authenticate(app.checkoutHandler))
 
 	return mux
 }

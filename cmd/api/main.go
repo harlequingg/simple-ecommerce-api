@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/stripe/stripe-go/v81"
 )
 
 type Config struct {
@@ -32,6 +34,7 @@ const (
 )
 
 func main() {
+	stripe.Key = os.Getenv("STRIPE_SECRET_KEY")
 	var cfg Config
 
 	defaultPort, err := strconv.Atoi(os.Getenv("PORT"))

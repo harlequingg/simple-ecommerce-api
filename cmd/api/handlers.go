@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"github.com/stripe/stripe-go/v81"
+	"github.com/stripe/stripe-go/v81/checkout/session"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -205,7 +207,7 @@ func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	p, err := app.storage.CreateProduct(req.Name, req.Description, req.Price, int32(req.Amount), u.ID)
+	p, err := app.storage.CreateProduct(req.Name, req.Description, req.Price, int32(req.Amount))
 	if err != nil {
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
@@ -371,10 +373,6 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 		writeError(errors.New("not found"), http.StatusNotFound, w)
 		return
 	}
-	if p.SellerID != u.ID {
-		writeError(errors.New("permission denied"), http.StatusForbidden, w)
-		return
-	}
 	if req.Name != nil {
 		p.Name = *req.Name
 	}
@@ -420,10 +418,6 @@ func (app *Application) deleteProductHandler(w http.ResponseWriter, r *http.Requ
 	}
 	if p == nil {
 		writeError(errors.New("not found"), http.StatusNotFound, w)
-		return
-	}
-	if p.SellerID != u.ID {
-		writeError(errors.New("permission denied"), http.StatusForbidden, w)
 		return
 	}
 	err = app.storage.DeleteProduct(p)
@@ -630,6 +624,54 @@ func (app *Application) deleteCartItems(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(map[string]any{"message": "resources deleted successfully"}, http.StatusOK, w)
+}
+
+func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) {
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	items, err := app.storage.GetCartItemsForCheckout(u.ID)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if len(items) == 0 {
+		writeError(errors.New("shopping cart is empty"), http.StatusBadRequest, w)
+		return
+	}
+	log.Println(items)
+	lineItems := make([]*stripe.CheckoutSessionLineItemParams, len(items))
+	for idx, item := range items {
+		price, _ := item.Product.Price.Mul(decimal.NewFromInt(100)).Float64()
+		lineItems[idx] = &stripe.CheckoutSessionLineItemParams{
+			PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
+				Currency: stripe.String("usd"),
+				ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
+					Name: stripe.String(item.Product.Name),
+				},
+				UnitAmountDecimal: stripe.Float64(price),
+			},
+			Quantity: stripe.Int64(int64(min(item.Amount, item.Product.Amount))),
+		}
+	}
+	params := &stripe.CheckoutSessionParams{
+		LineItems:  lineItems,
+		Mode:       stripe.String(string(stripe.CheckoutSessionModePayment)),
+		SuccessURL: stripe.String("http://localhost:8080/static/success.html"),
+		CancelURL:  stripe.String("http://localhost:8080/static/cancel.html"),
+	}
+
+	s, err := session.New(params)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
+	writeJSON(map[string]any{"url": s.URL}, http.StatusCreated, w)
 }
 
 func readJSON(r *http.Request, dst any) error {

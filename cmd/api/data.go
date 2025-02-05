@@ -39,7 +39,6 @@ type Product struct {
 	Description string          `json:"description"`
 	Price       decimal.Decimal `json:"price"`
 	Amount      int32           `json:"amount"`
-	SellerID    int64           `json:"seller_id"`
 	Version     int32           `json:"-"`
 }
 
@@ -49,4 +48,11 @@ type CartItem struct {
 	UserID    int64 `json:"-"`
 	Amount    int32 `json:"amount"`
 	Version   int32 `json:"-"`
+}
+
+type CartItemCheckout struct {
+	ID      int64
+	Amount  int32
+	Version int32
+	Product Product
 }

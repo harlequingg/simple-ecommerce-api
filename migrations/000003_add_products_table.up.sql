@@ -4,9 +4,8 @@ CREATE TABLE IF NOT EXISTS products (
     updated_at timestamp(0) with time zone NOT NULL DEFAULT NOW(),
     name varchar(50) NOT NULL,
     description text NOT NULL,
-    price_in_dollars decimal(19, 2) NOT NULL,
-    amount_in_stock integer NOT NULL,
-    seller_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    price decimal(19, 2) NOT NULL,
+    amount integer NOT NULL,
     version integer NOT NULL DEFAULT 1
 );
 
