@@ -34,6 +34,8 @@ const (
 )
 
 func main() {
+	log.SetFlags(log.LUTC | log.Llongfile)
+
 	stripe.Key = os.Getenv("STRIPE_SECRET_KEY")
 	var cfg Config
 

@@ -8,6 +8,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -469,5 +470,79 @@ func (s *Storage) DeleteCartItems(userID int64) error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (s *Storage) CheckoutCart(userID int64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ops := &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+	}
+	tx, err := s.db.BeginTx(ctx, ops)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+	query0 := `SELECT c.id, c.amount, c.version, p.id, p.name, p.price, p.amount, p.version 
+			   FROM cart_items as c
+			   INNER JOIN products as p
+			   ON c.product_id = p.id
+			   WHERE c.user_id = $1`
+
+	query1 := `UPDATE products
+			   SET amount = amount - $1, version = version + 1
+			   WHERE id = $2 AND version = $3`
+
+	query2 := `DELETE FROM cart_items
+			   WHERE user_id = $1`
+
+	rows, err := tx.QueryContext(ctx, query0, userID)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return err
+	}
+	defer rows.Close()
+
+	items := []CartItemCheckout{}
+	for rows.Next() {
+		item := CartItemCheckout{}
+		p := &item.Product
+		err := rows.Scan(&item.ID, &item.Amount, &item.Version, &p.ID, &p.Name, &p.Price, &p.Amount, &p.Version)
+		if err != nil {
+			log.Println(err)
+			tx.Rollback()
+			return err
+		}
+		if item.Amount > p.Amount {
+			tx.Rollback()
+			return errors.New("out of stock")
+		}
+		items = append(items, item)
+	}
+
+	for _, item := range items {
+		_, err = tx.ExecContext(ctx, query1, item.Amount, item.Product.ID, item.Product.Version)
+		if err != nil {
+			log.Println(err)
+			tx.Rollback()
+			return err
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, query2, userID)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
 	return nil
 }

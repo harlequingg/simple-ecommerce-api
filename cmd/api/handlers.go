@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -642,26 +643,41 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(errors.New("shopping cart is empty"), http.StatusBadRequest, w)
 		return
 	}
-	log.Println(items)
 	lineItems := make([]*stripe.CheckoutSessionLineItemParams, len(items))
 	for idx, item := range items {
+		if item.Amount > item.Product.Amount {
+			writeError(fmt.Errorf("product %d has only %d in stock and you want %d", item.Product.ID, item.Product.Amount, item.Amount), http.StatusBadRequest, w)
+			return
+		}
 		price, _ := item.Product.Price.Mul(decimal.NewFromInt(100)).Float64()
 		lineItems[idx] = &stripe.CheckoutSessionLineItemParams{
 			PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
 				Currency: stripe.String("usd"),
 				ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
 					Name: stripe.String(item.Product.Name),
+					Metadata: map[string]string{
+						"product_id": strconv.Itoa(int(item.Product.ID)),
+					},
 				},
 				UnitAmountDecimal: stripe.Float64(price),
 			},
-			Quantity: stripe.Int64(int64(min(item.Amount, item.Product.Amount))),
+			Quantity: stripe.Int64(int64(item.Amount)),
 		}
 	}
+
+	err = app.storage.CheckoutCart(u.ID)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
 	params := &stripe.CheckoutSessionParams{
 		LineItems:  lineItems,
 		Mode:       stripe.String(string(stripe.CheckoutSessionModePayment)),
 		SuccessURL: stripe.String("http://localhost:8080/static/success.html"),
 		CancelURL:  stripe.String("http://localhost:8080/static/cancel.html"),
+		ExpiresAt:  stripe.Int64(time.Now().Add(30 * time.Minute).Unix()),
 	}
 
 	s, err := session.New(params)
@@ -672,6 +688,72 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(map[string]any{"url": s.URL}, http.StatusCreated, w)
+}
+
+func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
+	const MaxBytesReader = int64(65546)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxBytesReader)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Error reading request body: %v\n", err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	event := stripe.Event{}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		log.Printf("Failed to parse webhook body json: %v\n", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	log.Printf("Event: %v\n", event)
+
+	var cs stripe.CheckoutSession
+	err = json.Unmarshal(event.Data.Raw, &cs)
+	if err != nil {
+		log.Printf("Error Pasring webhook JSON: %v\n", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	params := &stripe.CheckoutSessionParams{}
+	params.AddExpand("line_items")
+
+	s, err := session.Get(cs.ID, params)
+	if err != nil {
+		log.Printf("Error Getting Session: %v\n", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	switch event.Type {
+	case stripe.EventTypeCheckoutSessionCompleted, stripe.EventTypeCheckoutSessionAsyncPaymentSucceeded:
+		if s.PaymentStatus != stripe.CheckoutSessionPaymentStatusUnpaid {
+			log.Println("Place Order")
+		}
+	case stripe.EventTypeCheckoutSessionExpired:
+		for _, item := range s.LineItems.Data {
+			amount := item.Quantity
+			product_id, err := strconv.Atoi(item.Price.Metadata["product_id"])
+			if err != nil {
+				log.Println(err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			p, err := app.storage.GetProductByID(int64(product_id))
+			if err != nil {
+				log.Println(err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			p.Amount += int32(amount)
+			err = app.storage.UpdateProduct(p)
+			if err != nil {
+				log.Println(err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+	}
 }
 
 func readJSON(r *http.Request, dst any) error {
