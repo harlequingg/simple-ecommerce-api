@@ -709,35 +709,10 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
 	}
-	items, err := app.storage.GetCartItemsForCheckout(u.ID)
-	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
-		return
-	}
-	if len(items) == 0 {
-		writeError(errors.New("shopping cart is empty"), http.StatusBadRequest, w)
-		return
-	}
-
-	t := decimal.Zero
-	for _, item := range items {
-		if item.Quantity > item.Product.Quantity {
-			writeError(fmt.Errorf("product %d-%v has only %d in stock and you want %d", item.Product.ID, item.Product.Name, item.Product.Quantity, item.Quantity), http.StatusForbidden, w)
-			return
-		}
-		t = t.Add(item.Product.Price.Mul(decimal.NewFromInt(item.Quantity)))
-	}
-
-	if t.GreaterThan(u.Balance) {
-		writeError(fmt.Errorf("your total is %v but you only have %v", t, u.Balance), http.StatusForbidden, w)
-		return
-	}
-
 	total, err := app.storage.CheckoutCart(u)
 	if err != nil {
 		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeError(err, http.StatusForbidden, w)
 		return
 	}
 	writeJSON(map[string]any{"total": total}, http.StatusOK, w)

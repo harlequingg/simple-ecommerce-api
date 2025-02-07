@@ -402,37 +402,6 @@ func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
 	return cartItems, nil
 }
 
-func (s *Storage) GetCartItemsForCheckout(userID int64) ([]CartItemCheckout, error) {
-	query := `SELECT c.id, c.quantity, c.version, p.id, p.name, p.price, p.quantity, p.version 
-			  FROM cart_items as c
-			  INNER JOIN products as p
-			  ON c.product_id = p.id
-			  WHERE c.user_id = $1
-			  ORDER BY c.id ASC`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	args := []any{userID}
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	cartItems := []CartItemCheckout{}
-	for rows.Next() {
-		item := CartItemCheckout{}
-		p := &item.Product
-		err := rows.Scan(&item.ID, &item.Quantity, &item.Version, &p.ID, &p.Name, &p.Price, &p.Quantity, &p.Version)
-		if err != nil {
-			return nil, err
-		}
-		cartItems = append(cartItems, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return cartItems, nil
-}
-
 func (s *Storage) UpdateCartItem(cartItem *CartItem) error {
 	query := `UPDATE cart_items
 			  SET quantity = $1, version = version + 1
@@ -491,17 +460,6 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 			   ON c.product_id = p.id
 			   WHERE c.user_id = $1`
 
-	query1 := `UPDATE products
-			   SET quantity = quantity - $1, version = version + 1
-			   WHERE id = $2 AND version = $3`
-
-	query2 := `UPDATE users
-	           SET balance = balance - $1, version = version + 1
-			   WHERE id = $2 AND version = $3`
-
-	query3 := `DELETE FROM cart_items
-			   WHERE user_id = $1`
-
 	rows, err := tx.QueryContext(ctx, query0, u.ID)
 	if err != nil {
 		log.Println(err)
@@ -510,10 +468,17 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 	}
 	defer rows.Close()
 
-	items := []CartItemCheckout{}
+	type cartItemCheckout struct {
+		ID       int64
+		Quantity int64
+		Version  int32
+		Product  Product
+	}
+
+	items := []cartItemCheckout{}
 	total := decimal.Zero
 	for rows.Next() {
-		item := CartItemCheckout{}
+		item := cartItemCheckout{}
 		p := &item.Product
 		err := rows.Scan(&item.ID, &item.Quantity, &item.Version, &p.ID, &p.Name, &p.Price, &p.Quantity, &p.Version)
 		if err != nil {
@@ -523,11 +488,29 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 		}
 		if item.Quantity > p.Quantity {
 			tx.Rollback()
-			return decimal.Zero, errors.New("out of stock")
+			return decimal.Zero, errors.New("product %d-%v has only %d in stock and you want %d")
 		}
 		items = append(items, item)
 		total = total.Add(item.Product.Price.Mul(decimal.NewFromInt(item.Quantity)))
 	}
+	if err = rows.Err(); err != nil {
+		tx.Rollback()
+		return decimal.Zero, err
+	}
+
+	if len(items) == 0 {
+		tx.Rollback()
+		return decimal.Zero, errors.New("cart is empty")
+	}
+
+	if total.GreaterThan(u.Balance) {
+		tx.Rollback()
+		return decimal.Zero, fmt.Errorf("your total is %v but you only have %v", total, u.Balance)
+	}
+
+	query1 := `UPDATE products
+			   SET quantity = quantity - $1, version = version + 1
+			   WHERE id = $2 AND version = $3`
 
 	for _, item := range items {
 		_, err = tx.ExecContext(ctx, query1, item.Quantity, item.Product.ID, item.Product.Version)
@@ -538,12 +521,43 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 		}
 	}
 
+	query2 := `UPDATE users
+			   SET balance = balance - $1, version = version + 1
+	           WHERE id = $2 AND version = $3`
+
 	_, err = tx.ExecContext(ctx, query2, total, u.ID, u.Version)
 	if err != nil {
 		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, err
 	}
+
+	query4 := `INSERT INTO orders(user_id)
+	           VALUES ($1)
+			   RETURNING id`
+
+	orderID := int64(0)
+	err = tx.QueryRowContext(ctx, query4, u.ID).Scan(&orderID)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, err
+	}
+
+	query5 := `INSERT INTO order_items(order_id, product_id, quantity, price)
+			   VALUES ($1, $2, $3, $4)`
+
+	for _, item := range items {
+		_, err = tx.ExecContext(ctx, query5, orderID, item.Product.ID, item.Quantity, item.Product.Price)
+		if err != nil {
+			log.Println(err)
+			tx.Rollback()
+			return decimal.Zero, err
+		}
+	}
+
+	query3 := `DELETE FROM cart_items
+			   WHERE user_id = $1`
 
 	_, err = tx.ExecContext(ctx, query3, u.ID)
 	if err != nil {

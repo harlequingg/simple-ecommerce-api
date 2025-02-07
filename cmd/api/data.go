@@ -51,9 +51,24 @@ type CartItem struct {
 	Version   int32 `json:"-"`
 }
 
-type CartItemCheckout struct {
-	ID       int64
-	Quantity int64
-	Version  int32
-	Product  Product
+type OrderStatus struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+}
+
+type Order struct {
+	ID          int64     `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UserID      int64     `json:"user_id"`
+	StatusID    int64     `json:"status_id"`
+	CompletedAt time.Time `json:"completed_at"`
+	Version     int32     `json:"-"`
+}
+
+type OrderItem struct {
+	ID         int64           `json:"id"`
+	OrderID    int64           `json:"order_id"`
+	ProductID  int64           `json:"product_id"`
+	QuantityID int64           `json:"quantity"`
+	Price      decimal.Decimal `json:"price"`
 }
