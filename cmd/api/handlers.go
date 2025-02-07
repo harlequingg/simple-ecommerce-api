@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/checkout/session"
+	"github.com/stripe/stripe-go/webhook"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -182,7 +184,7 @@ func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Requ
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
 		Price       decimal.Decimal `json:"price"`
-		Amount      int             `json:"amount"`
+		Quantity    int64           `json:"quantity"`
 	}
 	err := readJSON(r, &req)
 	if err != nil {
@@ -195,7 +197,7 @@ func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Requ
 	v.Check(len(req.Name) <= 50, "name", "must not be more than 50 characters")
 	v.Check(req.Description != "", "description", "must be provided")
 	v.Check(req.Price.GreaterThan(decimal.NewFromInt(0)), "price", "must be greater than zero")
-	v.Check(req.Amount >= 0, "amount", "must be greater than or equal zero")
+	v.Check(req.Quantity >= 0, "quantity", "must be greater than or equal zero")
 
 	if v.HasError() {
 		writeError(v, http.StatusBadRequest, w)
@@ -208,7 +210,7 @@ func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	p, err := app.storage.CreateProduct(req.Name, req.Description, req.Price, int32(req.Amount))
+	p, err := app.storage.CreateProduct(req.Name, req.Description, req.Price, req.Quantity)
 	if err != nil {
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
@@ -331,7 +333,7 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 		Name        *string          `json:"name"`
 		Description *string          `json:"description"`
 		Price       *decimal.Decimal `json:"price"`
-		Amount      *int             `json:"amount"`
+		Quantity    *int64           `json:"quantity"`
 	}
 	err = readJSON(r, &req)
 	if err != nil {
@@ -350,8 +352,8 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 	if req.Price != nil {
 		v.Check(req.Price.GreaterThan(decimal.NewFromInt(0)), "price", "must be greater than zero")
 	}
-	if req.Amount != nil {
-		v.Check(*req.Amount >= 0, "amount", "must be greater than or equal zero")
+	if req.Quantity != nil {
+		v.Check(*req.Quantity >= 0, "quantity", "must be greater than or equal zero")
 	}
 	if v.HasError() {
 		writeError(v, http.StatusBadRequest, w)
@@ -383,8 +385,8 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 	if req.Price != nil {
 		p.Price = *req.Price
 	}
-	if req.Amount != nil {
-		p.Amount = int32(*req.Amount)
+	if req.Quantity != nil {
+		p.Quantity = *req.Quantity
 	}
 	err = app.storage.UpdateProduct(p)
 	if err != nil {
@@ -432,7 +434,7 @@ func (app *Application) deleteProductHandler(w http.ResponseWriter, r *http.Requ
 func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProductID int64 `json:"product_id"`
-		Amount    int32 `json:"amount"`
+		Quantity  int64 `json:"Quantity"`
 	}
 	err := readJSON(r, &req)
 	if err != nil {
@@ -442,7 +444,7 @@ func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Req
 
 	v := NewValidator()
 	v.Check(req.ProductID > 0, "product_id", "must be greater than zero")
-	v.Check(req.Amount > 0, "amount", "must be greater than zero")
+	v.Check(req.Quantity > 0, "quantity", "must be greater than zero")
 
 	if v.HasError() {
 		writeError(v, http.StatusBadRequest, w)
@@ -467,7 +469,7 @@ func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	cartItem, err := app.storage.CreateCartItem(req.ProductID, u.ID, req.Amount)
+	cartItem, err := app.storage.CreateCartItem(req.ProductID, u.ID, req.Quantity)
 	if err != nil {
 		log.Println(err)
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
@@ -533,7 +535,7 @@ func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Amount *int32 `json:"amount"`
+		Quantity *int64 `json:"quantity"`
 	}
 	err = readJSON(r, &req)
 	if err != nil {
@@ -541,8 +543,8 @@ func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := NewValidator()
-	v.Check(req.Amount != nil, "amount", "must be provided")
-	v.Check(*req.Amount > 0, "amount", "must be greater than zero")
+	v.Check(req.Quantity != nil, "quantity", "must be provided")
+	v.Check(*req.Quantity > 0, "quantity", "must be greater than zero")
 	if v.HasError() {
 		writeError(v, http.StatusBadRequest, w)
 		return
@@ -566,7 +568,7 @@ func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
 		writeError(errors.New("access denied"), http.StatusForbidden, w)
 		return
 	}
-	item.Amount = *req.Amount
+	item.Quantity = *req.Quantity
 	err = app.storage.UpdateCartItem(item)
 	if err != nil {
 		log.Println(err)
@@ -627,6 +629,62 @@ func (app *Application) deleteCartItems(w http.ResponseWriter, r *http.Request) 
 	writeJSON(map[string]any{"message": "resources deleted successfully"}, http.StatusOK, w)
 }
 
+const BalanceTransfer = "BalanceTransfer"
+
+func (app *Application) addToBalanceHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Balance decimal.Decimal `json:"balance"`
+	}
+	err := readJSON(r, &req)
+	if err != nil {
+		writeError(errors.New("bad request"), http.StatusBadRequest, w)
+		return
+	}
+
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
+	lineItems := make([]*stripe.CheckoutSessionLineItemParams, 1)
+	price, exact := req.Balance.Mul(decimal.NewFromInt(100)).Float64()
+	if !exact {
+		writeError(errors.New("bad request"), http.StatusBadRequest, w)
+		return
+	}
+
+	lineItems[0] = &stripe.CheckoutSessionLineItemParams{
+		PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
+			Currency: stripe.String("usd"),
+			ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
+				Name: stripe.String("Balance"),
+			},
+			UnitAmountDecimal: stripe.Float64(price),
+		},
+		Quantity: stripe.Int64(1),
+	}
+
+	params := &stripe.CheckoutSessionParams{
+		LineItems:  lineItems,
+		Mode:       stripe.String(string(stripe.CheckoutSessionModePayment)),
+		SuccessURL: stripe.String("http://localhost:8080/static/success.html"),
+		CancelURL:  stripe.String("http://localhost:8080/static/cancel.html"),
+		ExpiresAt:  stripe.Int64(time.Now().Add(30 * time.Minute).Unix()),
+		Metadata: map[string]string{
+			"user_id":          strconv.Itoa(int(u.ID)),
+			"balance_transfer": BalanceTransfer,
+		},
+	}
+	s, err := session.New(params)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	writeJSON(map[string]any{"url": s.URL}, http.StatusCreated, w)
+}
+
 func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) {
 	u := getUserFromRequest(r)
 	if u == nil {
@@ -645,8 +703,8 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	lineItems := make([]*stripe.CheckoutSessionLineItemParams, len(items))
 	for idx, item := range items {
-		if item.Amount > item.Product.Amount {
-			writeError(fmt.Errorf("product %d has only %d in stock and you want %d", item.Product.ID, item.Product.Amount, item.Amount), http.StatusBadRequest, w)
+		if item.Quantity > item.Product.Quantity {
+			writeError(fmt.Errorf("product %d has only %d in stock and you want %d", item.Product.ID, item.Product.Quantity, item.Quantity), http.StatusBadRequest, w)
 			return
 		}
 		price, _ := item.Product.Price.Mul(decimal.NewFromInt(100)).Float64()
@@ -661,7 +719,7 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 				},
 				UnitAmountDecimal: stripe.Float64(price),
 			},
-			Quantity: stripe.Int64(int64(item.Amount)),
+			Quantity: stripe.Int64(int64(item.Quantity)),
 		}
 	}
 
@@ -691,67 +749,86 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
-	const MaxBytesReader = int64(65546)
-	r.Body = http.MaxBytesReader(w, r.Body, MaxBytesReader)
-	payload, err := io.ReadAll(r.Body)
+	const MaxBodyBytes = int64(65536)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
+
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("Error reading request body: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error reading request body: %v\n", err)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
-	event := stripe.Event{}
-	if err := json.Unmarshal(payload, &event); err != nil {
-		log.Printf("Failed to parse webhook body json: %v\n", err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	log.Printf("Event: %v\n", event)
 
-	var cs stripe.CheckoutSession
-	err = json.Unmarshal(event.Data.Raw, &cs)
+	endpointSecret := os.Getenv("STRIPE_WEBHOOK_SECRET_KEY")
+	event, err := webhook.ConstructEvent(body, r.Header.Get("Stripe-Signature"), endpointSecret)
+
 	if err != nil {
-		log.Printf("Error Pasring webhook JSON: %v\n", err)
-		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(os.Stderr, "Error verifying webhook signature: %v\n", err)
+		w.WriteHeader(http.StatusBadRequest) // Return a 400 error on a bad signature
 		return
 	}
+	if event.Type == string(stripe.EventTypeCheckoutSessionCompleted) ||
+		event.Type == string(stripe.EventTypeCheckoutSessionAsyncPaymentSucceeded) {
 
-	params := &stripe.CheckoutSessionParams{}
-	params.AddExpand("line_items")
-
-	s, err := session.Get(cs.ID, params)
-	if err != nil {
-		log.Printf("Error Getting Session: %v\n", err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	switch event.Type {
-	case stripe.EventTypeCheckoutSessionCompleted, stripe.EventTypeCheckoutSessionAsyncPaymentSucceeded:
-		if s.PaymentStatus != stripe.CheckoutSessionPaymentStatusUnpaid {
-			log.Println("Place Order")
+		var cs stripe.CheckoutSession
+		err = json.Unmarshal(event.Data.Raw, &cs)
+		if err != nil {
+			log.Printf("Error Pasring webhook JSON: %v\n", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
-	case stripe.EventTypeCheckoutSessionExpired:
-		for _, item := range s.LineItems.Data {
-			amount := item.Quantity
-			product_id, err := strconv.Atoi(item.Price.Metadata["product_id"])
-			if err != nil {
-				log.Println(err)
+
+		params := &stripe.CheckoutSessionParams{
+			Expand: []*string{
+				stripe.String("line_items"),
+			},
+		}
+
+		s, err := session.Get(cs.ID, params)
+		if err != nil {
+			log.Printf("Error Getting Session: %v\n", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		items := s.LineItems.Data
+		if len(items) < 1 {
+			log.Println("bad request: len(items) must be atleast1")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if s.PaymentStatus != stripe.CheckoutSessionPaymentStatusUnpaid {
+			if s.Metadata["balance_transfer"] != BalanceTransfer {
+				log.Println("bad request: missing balance_transfer in metadata")
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			p, err := app.storage.GetProductByID(int64(product_id))
+			userID, err := strconv.Atoi(s.Metadata["user_id"])
+			if err != nil {
+				log.Println("bad request: ", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			u, err := app.storage.GetUserById(int64(userID))
 			if err != nil {
 				log.Println(err)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			p.Amount += int32(amount)
-			err = app.storage.UpdateProduct(p)
+			if u == nil {
+				log.Println("user doesn't exist")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			amount := decimal.NewFromFloat(items[0].Price.UnitAmountDecimal).Div(decimal.NewFromInt(100))
+			u.Balance = u.Balance.Add(amount)
+			err = app.storage.UpdateUser(u)
 			if err != nil {
 				log.Println(err)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
+			log.Println("success")
 		}
 	}
 }

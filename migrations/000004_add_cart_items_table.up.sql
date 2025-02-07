@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS cart_items (
     id bigserial PRIMARY KEY,
     product_id bigint NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    amount integer NOT NULL,
+    quantity bigint NOT NULL,
     version integer NOT NULL DEFAULT 1
 );
 

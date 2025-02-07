@@ -7,13 +7,14 @@ import (
 )
 
 type User struct {
-	ID           int64     `json:"id"`
-	CreatedAt    time.Time `json:"created_at"`
-	Name         string    `json:"name"`
-	Email        string    `json:"email"`
-	PasswordHash []byte    `json:"-"`
-	IsActivated  bool      `json:"is_activated"`
-	Version      int32     `json:"-"`
+	ID           int64           `json:"id"`
+	CreatedAt    time.Time       `json:"created_at"`
+	Name         string          `json:"name"`
+	Email        string          `json:"email"`
+	PasswordHash []byte          `json:"-"`
+	IsActivated  bool            `json:"is_activated"`
+	Balance      decimal.Decimal `json:"balance"`
+	Version      int32           `json:"-"`
 }
 
 type TokenScope string
@@ -38,7 +39,7 @@ type Product struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Price       decimal.Decimal `json:"price"`
-	Amount      int32           `json:"amount"`
+	Quantity    int64           `json:"quantity"`
 	Version     int32           `json:"-"`
 }
 
@@ -46,13 +47,13 @@ type CartItem struct {
 	ID        int64 `json:"id"`
 	ProductID int64 `json:"product_id"`
 	UserID    int64 `json:"-"`
-	Amount    int32 `json:"amount"`
+	Quantity  int64 `json:"quantity"`
 	Version   int32 `json:"-"`
 }
 
 type CartItemCheckout struct {
-	ID      int64
-	Amount  int32
-	Version int32
-	Product Product
+	ID       int64
+	Quantity int64
+	Version  int32
+	Product  Product
 }

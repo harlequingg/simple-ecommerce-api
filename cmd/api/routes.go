@@ -30,6 +30,7 @@ func ComposeRoutes(app *Application) http.Handler {
 	mux.HandleFunc("DELETE /v1/cart", app.authenticate(app.deleteCartItems))
 	mux.HandleFunc("DELETE /v1/cart/{id}", app.authenticate(app.deleteCartItem))
 
+	mux.HandleFunc("POST /v1/balance", app.authenticate(app.addToBalanceHandler))
 	mux.HandleFunc("POST /v1/checkout", app.authenticate(app.checkoutHandler))
 	mux.HandleFunc("POST /v1/webhook", app.webhookHandler)
 

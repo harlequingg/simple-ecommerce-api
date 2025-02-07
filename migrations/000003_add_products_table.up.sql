@@ -4,8 +4,8 @@ CREATE TABLE IF NOT EXISTS products (
     updated_at timestamp(0) with time zone NOT NULL DEFAULT NOW(),
     name varchar(50) NOT NULL,
     description text NOT NULL,
-    price decimal(19, 2) NOT NULL,
-    amount integer NOT NULL,
+    price decimal(10, 2) NOT NULL,
+    quantity bigint NOT NULL,
     version integer NOT NULL DEFAULT 1
 );
 

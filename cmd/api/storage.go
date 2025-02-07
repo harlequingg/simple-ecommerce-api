@@ -65,7 +65,7 @@ func (s *Storage) CreateUser(name, email string, passwordHash []byte) (*User, er
 }
 
 func (s *Storage) GetUserById(id int64) (*User, error) {
-	query := `SELECT created_at, name, email, password_hash, is_activated, version
+	query := `SELECT created_at, name, email, password_hash, is_activated, balance, version
 			  FROM users
 			  WHERE id = $1`
 
@@ -76,7 +76,7 @@ func (s *Storage) GetUserById(id int64) (*User, error) {
 	u.ID = id
 
 	args := []any{u.ID}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Version)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Balance, &u.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -88,7 +88,7 @@ func (s *Storage) GetUserById(id int64) (*User, error) {
 }
 
 func (s *Storage) GetUserByEmail(email string) (*User, error) {
-	query := `SELECT id, created_at, name, password_hash, is_activated, version
+	query := `SELECT id, created_at, name, password_hash, is_activated, balance, version
 			  FROM users
 			  WHERE email = $1`
 
@@ -99,7 +99,7 @@ func (s *Storage) GetUserByEmail(email string) (*User, error) {
 	u.Email = email
 
 	args := []any{u.Email}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.PasswordHash, &u.IsActivated, &u.Version)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.PasswordHash, &u.IsActivated, &u.Balance, &u.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -111,15 +111,16 @@ func (s *Storage) GetUserByEmail(email string) (*User, error) {
 }
 
 func (s *Storage) UpdateUser(u *User) error {
+	log.Println(u.Balance)
 	query := `UPDATE users
-			  SET name = $1, email = $2, password_hash = $3, is_activated = $4, version = version + 1  
-			  WHERE id = $5 AND version = $6 
+			  SET name = $1, email = $2, password_hash = $3, is_activated = $4, balance = $5, version = version + 1  
+			  WHERE id = $6 AND version = $7 
 			  RETURNING version`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated, u.ID, u.Version}
+	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated, u.Balance, u.ID, u.Version}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.Version)
 	if err != nil {
 		return err
@@ -174,7 +175,7 @@ func (s *Storage) CreateToken(userID int64, duration time.Duration, scope TokenS
 
 func (s *Storage) GetUserFromToken(text string, scope TokenScope) (*User, error) {
 	hash := sha256.Sum256([]byte(text))
-	query := `SELECT u.id, u.created_at, u.name, u.email, u.password_hash, u.is_activated, u.version
+	query := `SELECT u.id, u.created_at, u.name, u.email, u.password_hash, u.is_activated, u.balance, u.version
 			  FROM users as u
 			  INNER JOIN tokens as t
 			  on u.id = t.user_id
@@ -185,7 +186,7 @@ func (s *Storage) GetUserFromToken(text string, scope TokenScope) (*User, error)
 	var u User
 
 	args := []any{hash[:], scope}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Version)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Balance, &u.Version)
 	if err != nil {
 		return nil, err
 	}
@@ -215,8 +216,8 @@ func (s *Storage) DeleteExpiredTokens() error {
 	return err
 }
 
-func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, amount int32) (*Product, error) {
-	query := `INSERT INTO products(name, description, price, amount)
+func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, quantity int64) (*Product, error) {
+	query := `INSERT INTO products(name, description, price, quantity)
 			  VALUES ($1, $2, $3, $4)
 			  RETURNING id, created_at, updated_at, version`
 
@@ -227,10 +228,10 @@ func (s *Storage) CreateProduct(name, description string, price decimal.Decimal,
 		Name:        name,
 		Description: description,
 		Price:       price,
-		Amount:      amount,
+		Quantity:    quantity,
 	}
 
-	args := []any{name, description, price, amount}
+	args := []any{name, description, price, quantity}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Version)
 	if err != nil {
 		return nil, err
@@ -239,7 +240,7 @@ func (s *Storage) CreateProduct(name, description string, price decimal.Decimal,
 }
 
 func (s *Storage) GetProductByID(id int64) (*Product, error) {
-	query := `SELECT created_at, updated_at, name, description, price, amount, version
+	query := `SELECT created_at, updated_at, name, description, price, quantity, version
 			  FROM products
 			  WHERE id = $1`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -249,7 +250,7 @@ func (s *Storage) GetProductByID(id int64) (*Product, error) {
 	p := Product{
 		ID: id,
 	}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.Version)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Quantity, &p.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -270,7 +271,7 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 	if column != "id" {
 		sortStr = fmt.Sprintf("%s %s, id ASC", column, op)
 	}
-	query := fmt.Sprintf(`SELECT COUNT(*) OVER(), id, created_at, updated_at, name, description, price, amount, version
+	query := fmt.Sprintf(`SELECT COUNT(*) OVER(), id, created_at, updated_at, name, description, price, quantity, version
 			  FROM products
 			  WHERE ($1 = '' OR to_tsvector('simple', name) @@ plainto_tsquery('simple', $1))
 			  AND ($2 = '' OR to_tsvector('simple', description) @@ plainto_tsquery('simple', $2))
@@ -289,7 +290,7 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 	products := []Product{}
 	for rows.Next() {
 		p := Product{}
-		err := rows.Scan(&total, &p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Amount, &p.Version)
+		err := rows.Scan(&total, &p.ID, &p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Quantity, &p.Version)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -303,14 +304,14 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 
 func (s *Storage) UpdateProduct(p *Product) error {
 	query := `UPDATE products
-	          SET name = $1, description = $2, price = $3, amount = $4, updated_at = NOW(), version = version + 1
+	          SET name = $1, description = $2, price = $3, quantity = $4, updated_at = NOW(), version = version + 1
 			  WHERE id = $5 AND version = $6
 			  RETURNING version`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	args := []any{p.Name, p.Description, p.Price, p.Amount, p.ID, p.Version}
+	args := []any{p.Name, p.Description, p.Price, p.Quantity, p.ID, p.Version}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.Version)
 	if err != nil {
 		return err
@@ -330,18 +331,18 @@ func (s *Storage) DeleteProduct(p *Product) error {
 	return err
 }
 
-func (s *Storage) CreateCartItem(productID int64, userID int64, amount int32) (*CartItem, error) {
-	query := `INSERT INTO cart_items(product_id, user_id, amount)
+func (s *Storage) CreateCartItem(productID int64, userID int64, quantity int64) (*CartItem, error) {
+	query := `INSERT INTO cart_items(product_id, user_id, quantity)
 			  VALUES ($1, $2, $3)
 			  RETURNING id`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	args := []any{productID, userID, amount}
+	args := []any{productID, userID, quantity}
 	c := CartItem{
 		ProductID: productID,
 		UserID:    userID,
-		Amount:    amount,
+		Quantity:  quantity,
 	}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&c.ID)
 	if err != nil {
@@ -351,7 +352,7 @@ func (s *Storage) CreateCartItem(productID int64, userID int64, amount int32) (*
 }
 
 func (s *Storage) GetCartItemById(cartItemID int64) (*CartItem, error) {
-	query := `SELECT product_id, user_id, amount, version
+	query := `SELECT product_id, user_id, quantity, version
 			  FROM cart_items
 			  WHERE id = $1`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -361,7 +362,7 @@ func (s *Storage) GetCartItemById(cartItemID int64) (*CartItem, error) {
 	item := CartItem{
 		ID: cartItemID,
 	}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&item.ProductID, &item.UserID, &item.Amount, &item.Version)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&item.ProductID, &item.UserID, &item.Quantity, &item.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -372,7 +373,7 @@ func (s *Storage) GetCartItemById(cartItemID int64) (*CartItem, error) {
 }
 
 func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
-	query := `SELECT id, product_id, amount, version
+	query := `SELECT id, product_id, quantity, version
 			  FROM cart_items
 			  WHERE user_id = $1
 			  ORDER BY id ASC`
@@ -389,7 +390,7 @@ func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
 		item := CartItem{
 			UserID: userID,
 		}
-		err := rows.Scan(&item.ID, &item.ProductID, &item.Amount, &item.Version)
+		err := rows.Scan(&item.ID, &item.ProductID, &item.Quantity, &item.Version)
 		if err != nil {
 			return nil, err
 		}
@@ -402,7 +403,7 @@ func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
 }
 
 func (s *Storage) GetCartItemsForCheckout(userID int64) ([]CartItemCheckout, error) {
-	query := `SELECT c.id, c.amount, c.version, p.id, p.name, p.price, p.amount, p.version 
+	query := `SELECT c.id, c.quantity, c.version, p.id, p.name, p.price, p.quantity, p.version 
 			  FROM cart_items as c
 			  INNER JOIN products as p
 			  ON c.product_id = p.id
@@ -420,7 +421,7 @@ func (s *Storage) GetCartItemsForCheckout(userID int64) ([]CartItemCheckout, err
 	for rows.Next() {
 		item := CartItemCheckout{}
 		p := &item.Product
-		err := rows.Scan(&item.ID, &item.Amount, &item.Version, &p.ID, &p.Name, &p.Price, &p.Amount, &p.Version)
+		err := rows.Scan(&item.ID, &item.Quantity, &item.Version, &p.ID, &p.Name, &p.Price, &p.Quantity, &p.Version)
 		if err != nil {
 			return nil, err
 		}
@@ -434,12 +435,12 @@ func (s *Storage) GetCartItemsForCheckout(userID int64) ([]CartItemCheckout, err
 
 func (s *Storage) UpdateCartItem(cartItem *CartItem) error {
 	query := `UPDATE cart_items
-			  SET amount = $1, version = version + 1
+			  SET quantity = $1, version = version + 1
 			  WHERE id = $2 AND version = $3
 			  RETURNING version`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	args := []any{cartItem.Amount, cartItem.ID, cartItem.Version}
+	args := []any{cartItem.Quantity, cartItem.ID, cartItem.Version}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&cartItem.Version)
 	if err != nil {
 		return err
@@ -484,14 +485,14 @@ func (s *Storage) CheckoutCart(userID int64) error {
 		log.Println(err)
 		return err
 	}
-	query0 := `SELECT c.id, c.amount, c.version, p.id, p.name, p.price, p.amount, p.version 
+	query0 := `SELECT c.id, c.quantity, c.version, p.id, p.name, p.price, p.quantity, p.version 
 			   FROM cart_items as c
 			   INNER JOIN products as p
 			   ON c.product_id = p.id
 			   WHERE c.user_id = $1`
 
 	query1 := `UPDATE products
-			   SET amount = amount - $1, version = version + 1
+			   SET quantity = quantity - $1, version = version + 1
 			   WHERE id = $2 AND version = $3`
 
 	query2 := `DELETE FROM cart_items
@@ -509,13 +510,13 @@ func (s *Storage) CheckoutCart(userID int64) error {
 	for rows.Next() {
 		item := CartItemCheckout{}
 		p := &item.Product
-		err := rows.Scan(&item.ID, &item.Amount, &item.Version, &p.ID, &p.Name, &p.Price, &p.Amount, &p.Version)
+		err := rows.Scan(&item.ID, &item.Quantity, &item.Version, &p.ID, &p.Name, &p.Price, &p.Quantity, &p.Version)
 		if err != nil {
 			log.Println(err)
 			tx.Rollback()
 			return err
 		}
-		if item.Amount > p.Amount {
+		if item.Quantity > p.Quantity {
 			tx.Rollback()
 			return errors.New("out of stock")
 		}
@@ -523,7 +524,7 @@ func (s *Storage) CheckoutCart(userID int64) error {
 	}
 
 	for _, item := range items {
-		_, err = tx.ExecContext(ctx, query1, item.Amount, item.Product.ID, item.Product.Version)
+		_, err = tx.ExecContext(ctx, query1, item.Quantity, item.Product.ID, item.Product.Version)
 		if err != nil {
 			log.Println(err)
 			tx.Rollback()
