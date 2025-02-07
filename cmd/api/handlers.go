@@ -469,6 +469,15 @@ func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if p.Quantity < req.Quantity {
+		req.Quantity = p.Quantity
+	}
+
+	if req.Quantity == 0 {
+		writeError(fmt.Errorf("product with id: %d is out of stock", req.ProductID), http.StatusInternalServerError, w)
+		return
+	}
+
 	cartItem, err := app.storage.CreateCartItem(req.ProductID, u.ID, req.Quantity)
 	if err != nil {
 		log.Println(err)
@@ -633,11 +642,20 @@ const BalanceTransfer = "BalanceTransfer"
 
 func (app *Application) addToBalanceHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Balance decimal.Decimal `json:"balance"`
+		Balance *decimal.Decimal `json:"balance"`
 	}
 	err := readJSON(r, &req)
 	if err != nil {
 		writeError(errors.New("bad request"), http.StatusBadRequest, w)
+		return
+	}
+
+	v := NewValidator()
+	v.Check(req.Balance != nil, "balance", "must be provided")
+	v.Check(req.Balance.GreaterThan(decimal.Zero), "balance", "must be greater than zero")
+
+	if v.HasError() {
+		writeError(v, http.StatusBadRequest, w)
 		return
 	}
 
@@ -658,7 +676,7 @@ func (app *Application) addToBalanceHandler(w http.ResponseWriter, r *http.Reque
 		PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
 			Currency: stripe.String("usd"),
 			ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
-				Name: stripe.String("Balance"),
+				Name: stripe.String(fmt.Sprintf("Add to Account: %s-%s", u.Name, u.Email)),
 			},
 			UnitAmountDecimal: stripe.Float64(price),
 		},
@@ -701,51 +719,28 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 		writeError(errors.New("shopping cart is empty"), http.StatusBadRequest, w)
 		return
 	}
-	lineItems := make([]*stripe.CheckoutSessionLineItemParams, len(items))
-	for idx, item := range items {
+
+	t := decimal.Zero
+	for _, item := range items {
 		if item.Quantity > item.Product.Quantity {
-			writeError(fmt.Errorf("product %d has only %d in stock and you want %d", item.Product.ID, item.Product.Quantity, item.Quantity), http.StatusBadRequest, w)
+			writeError(fmt.Errorf("product %d-%v has only %d in stock and you want %d", item.Product.ID, item.Product.Name, item.Product.Quantity, item.Quantity), http.StatusForbidden, w)
 			return
 		}
-		price, _ := item.Product.Price.Mul(decimal.NewFromInt(100)).Float64()
-		lineItems[idx] = &stripe.CheckoutSessionLineItemParams{
-			PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
-				Currency: stripe.String("usd"),
-				ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
-					Name: stripe.String(item.Product.Name),
-					Metadata: map[string]string{
-						"product_id": strconv.Itoa(int(item.Product.ID)),
-					},
-				},
-				UnitAmountDecimal: stripe.Float64(price),
-			},
-			Quantity: stripe.Int64(int64(item.Quantity)),
-		}
+		t = t.Add(item.Product.Price.Mul(decimal.NewFromInt(item.Quantity)))
 	}
 
-	err = app.storage.CheckoutCart(u.ID)
+	if t.GreaterThan(u.Balance) {
+		writeError(fmt.Errorf("your total is %v but you only have %v", t, u.Balance), http.StatusForbidden, w)
+		return
+	}
+
+	total, err := app.storage.CheckoutCart(u)
 	if err != nil {
 		log.Println(err)
 		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
 		return
 	}
-
-	params := &stripe.CheckoutSessionParams{
-		LineItems:  lineItems,
-		Mode:       stripe.String(string(stripe.CheckoutSessionModePayment)),
-		SuccessURL: stripe.String("http://localhost:8080/static/success.html"),
-		CancelURL:  stripe.String("http://localhost:8080/static/cancel.html"),
-		ExpiresAt:  stripe.Int64(time.Now().Add(30 * time.Minute).Unix()),
-	}
-
-	s, err := session.New(params)
-	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
-		return
-	}
-
-	writeJSON(map[string]any{"url": s.URL}, http.StatusCreated, w)
+	writeJSON(map[string]any{"total": total}, http.StatusOK, w)
 }
 
 func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -822,6 +817,7 @@ func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			amount := decimal.NewFromFloat(items[0].Price.UnitAmountDecimal).Div(decimal.NewFromInt(100))
 			u.Balance = u.Balance.Add(amount)
+			// TODO: We should record this in the database because we might get the same exact request multiple times for the same user...
 			err = app.storage.UpdateUser(u)
 			if err != nil {
 				log.Println(err)

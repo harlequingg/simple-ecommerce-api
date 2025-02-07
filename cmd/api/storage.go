@@ -474,7 +474,7 @@ func (s *Storage) DeleteCartItems(userID int64) error {
 	return nil
 }
 
-func (s *Storage) CheckoutCart(userID int64) error {
+func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ops := &sql.TxOptions{
@@ -483,7 +483,7 @@ func (s *Storage) CheckoutCart(userID int64) error {
 	tx, err := s.db.BeginTx(ctx, ops)
 	if err != nil {
 		log.Println(err)
-		return err
+		return decimal.Zero, err
 	}
 	query0 := `SELECT c.id, c.quantity, c.version, p.id, p.name, p.price, p.quantity, p.version 
 			   FROM cart_items as c
@@ -495,18 +495,23 @@ func (s *Storage) CheckoutCart(userID int64) error {
 			   SET quantity = quantity - $1, version = version + 1
 			   WHERE id = $2 AND version = $3`
 
-	query2 := `DELETE FROM cart_items
+	query2 := `UPDATE users
+	           SET balance = balance - $1, version = version + 1
+			   WHERE id = $2 AND version = $3`
+
+	query3 := `DELETE FROM cart_items
 			   WHERE user_id = $1`
 
-	rows, err := tx.QueryContext(ctx, query0, userID)
+	rows, err := tx.QueryContext(ctx, query0, u.ID)
 	if err != nil {
 		log.Println(err)
 		tx.Rollback()
-		return err
+		return decimal.Zero, err
 	}
 	defer rows.Close()
 
 	items := []CartItemCheckout{}
+	total := decimal.Zero
 	for rows.Next() {
 		item := CartItemCheckout{}
 		p := &item.Product
@@ -514,13 +519,14 @@ func (s *Storage) CheckoutCart(userID int64) error {
 		if err != nil {
 			log.Println(err)
 			tx.Rollback()
-			return err
+			return decimal.Zero, err
 		}
 		if item.Quantity > p.Quantity {
 			tx.Rollback()
-			return errors.New("out of stock")
+			return decimal.Zero, errors.New("out of stock")
 		}
 		items = append(items, item)
+		total = total.Add(item.Product.Price.Mul(decimal.NewFromInt(item.Quantity)))
 	}
 
 	for _, item := range items {
@@ -528,22 +534,29 @@ func (s *Storage) CheckoutCart(userID int64) error {
 		if err != nil {
 			log.Println(err)
 			tx.Rollback()
-			return err
+			return decimal.Zero, err
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, query2, userID)
+	_, err = tx.ExecContext(ctx, query2, total, u.ID, u.Version)
 	if err != nil {
 		log.Println(err)
 		tx.Rollback()
-		return err
+		return decimal.Zero, err
+	}
+
+	_, err = tx.ExecContext(ctx, query3, u.ID)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, err
 	}
 
 	err = tx.Commit()
 	if err != nil {
 		log.Println(err)
-		return err
+		return decimal.Zero, err
 	}
 
-	return nil
+	return total, nil
 }
