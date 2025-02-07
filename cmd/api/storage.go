@@ -443,7 +443,7 @@ func (s *Storage) DeleteCartItems(userID int64) error {
 	return nil
 }
 
-func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
+func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ops := &sql.TxOptions{
@@ -452,7 +452,7 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 	tx, err := s.db.BeginTx(ctx, ops)
 	if err != nil {
 		log.Println(err)
-		return decimal.Zero, err
+		return decimal.Zero, 0, err
 	}
 	query0 := `SELECT c.id, c.quantity, c.version, p.id, p.name, p.price, p.quantity, p.version 
 			   FROM cart_items as c
@@ -464,7 +464,7 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 	if err != nil {
 		log.Println(err)
 		tx.Rollback()
-		return decimal.Zero, err
+		return decimal.Zero, 0, err
 	}
 	defer rows.Close()
 
@@ -484,28 +484,28 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 		if err != nil {
 			log.Println(err)
 			tx.Rollback()
-			return decimal.Zero, err
+			return decimal.Zero, 0, err
 		}
 		if item.Quantity > p.Quantity {
 			tx.Rollback()
-			return decimal.Zero, errors.New("product %d-%v has only %d in stock and you want %d")
+			return decimal.Zero, 0, errors.New("product %d-%v has only %d in stock and you want %d")
 		}
 		items = append(items, item)
 		total = total.Add(item.Product.Price.Mul(decimal.NewFromInt(item.Quantity)))
 	}
 	if err = rows.Err(); err != nil {
 		tx.Rollback()
-		return decimal.Zero, err
+		return decimal.Zero, 0, err
 	}
 
 	if len(items) == 0 {
 		tx.Rollback()
-		return decimal.Zero, errors.New("cart is empty")
+		return decimal.Zero, 0, errors.New("cart is empty")
 	}
 
 	if total.GreaterThan(u.Balance) {
 		tx.Rollback()
-		return decimal.Zero, fmt.Errorf("your total is %v but you only have %v", total, u.Balance)
+		return decimal.Zero, 0, fmt.Errorf("your total is %v but you only have %v", total, u.Balance)
 	}
 
 	query1 := `UPDATE products
@@ -517,7 +517,7 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 		if err != nil {
 			log.Println(err)
 			tx.Rollback()
-			return decimal.Zero, err
+			return decimal.Zero, 0, err
 		}
 	}
 
@@ -529,48 +529,138 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, error) {
 	if err != nil {
 		log.Println(err)
 		tx.Rollback()
-		return decimal.Zero, err
+		return decimal.Zero, 0, err
 	}
 
-	query4 := `INSERT INTO orders(user_id)
+	query3 := `INSERT INTO orders(user_id)
 	           VALUES ($1)
 			   RETURNING id`
 
 	orderID := int64(0)
-	err = tx.QueryRowContext(ctx, query4, u.ID).Scan(&orderID)
+	err = tx.QueryRowContext(ctx, query3, u.ID).Scan(&orderID)
 	if err != nil {
 		log.Println(err)
 		tx.Rollback()
-		return decimal.Zero, err
+		return decimal.Zero, 0, err
 	}
 
-	query5 := `INSERT INTO order_items(order_id, product_id, quantity, price)
+	query4 := `INSERT INTO order_items(order_id, product_id, quantity, price)
 			   VALUES ($1, $2, $3, $4)`
 
 	for _, item := range items {
-		_, err = tx.ExecContext(ctx, query5, orderID, item.Product.ID, item.Quantity, item.Product.Price)
+		_, err = tx.ExecContext(ctx, query4, orderID, item.Product.ID, item.Quantity, item.Product.Price)
 		if err != nil {
 			log.Println(err)
 			tx.Rollback()
-			return decimal.Zero, err
+			return decimal.Zero, 0, err
 		}
 	}
 
-	query3 := `DELETE FROM cart_items
+	query5 := `DELETE FROM cart_items
 			   WHERE user_id = $1`
 
-	_, err = tx.ExecContext(ctx, query3, u.ID)
+	_, err = tx.ExecContext(ctx, query5, u.ID)
 	if err != nil {
 		log.Println(err)
 		tx.Rollback()
-		return decimal.Zero, err
+		return decimal.Zero, 0, err
 	}
 
 	err = tx.Commit()
 	if err != nil {
 		log.Println(err)
-		return decimal.Zero, err
+		return decimal.Zero, 0, err
 	}
 
-	return total, nil
+	return total, orderID, nil
+}
+
+func (s *Storage) GetOrderByID(ID int64) (*Order, error) {
+	query := `SELECT user_id, created_at, status_id, completed_at, version
+	          FROM orders
+			  WHERE id = $1`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	order := Order{
+		ID: ID,
+	}
+
+	args := []any{ID}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&order.UserID, &order.CreatedAt, &order.StatusID, &order.CompletedAt, &order.Version)
+	if err != nil {
+		return nil, err
+	}
+	return &order, nil
+}
+
+func (s *Storage) GetOrders(userID int64) ([]Order, error) {
+	query := `SELECT id, created_at, status_id, completed_at, version
+	          FROM orders
+			  WHERE user_id = $1`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var orders []Order
+
+	args := []any{userID}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		order := Order{
+			UserID: userID,
+		}
+		err = rows.Scan(&order.ID, &order.CreatedAt, &order.StatusID, &order.CompletedAt, &order.Version)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return orders, nil
+}
+
+func (s *Storage) GetOrderItems(orderID int64) ([]OrderItem, error) {
+	query := `SELECT id, product_id, quantity, price
+	          FROM order_items
+			  WHERE order_id = $1`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var items []OrderItem
+
+	args := []any{orderID}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		item := OrderItem{
+			OrderID: orderID,
+		}
+		err = rows.Scan(&item.ID, &item.ProductID, &item.Quantity, &item.Price)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return items, nil
 }

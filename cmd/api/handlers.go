@@ -703,21 +703,6 @@ func (app *Application) addToBalanceHandler(w http.ResponseWriter, r *http.Reque
 	writeJSON(map[string]any{"url": s.URL}, http.StatusCreated, w)
 }
 
-func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) {
-	u := getUserFromRequest(r)
-	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
-		return
-	}
-	total, err := app.storage.CheckoutCart(u)
-	if err != nil {
-		log.Println(err)
-		writeError(err, http.StatusForbidden, w)
-		return
-	}
-	writeJSON(map[string]any{"total": total}, http.StatusOK, w)
-}
-
 func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 	const MaxBodyBytes = int64(65536)
 	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
@@ -802,6 +787,21 @@ func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			log.Println("success")
 		}
 	}
+}
+
+func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) {
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	total, orderID, err := app.storage.CheckoutCart(u)
+	if err != nil {
+		log.Println(err)
+		writeError(err, http.StatusForbidden, w)
+		return
+	}
+	writeJSON(map[string]any{"total": total, "order_id": orderID}, http.StatusOK, w)
 }
 
 func readJSON(r *http.Request, dst any) error {
