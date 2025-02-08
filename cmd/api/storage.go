@@ -566,6 +566,18 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 		return decimal.Zero, 0, err
 	}
 
+	query6 := `INSERT INTO transations(user_id, signature, amount)
+	           VALUES ($1, $2, $3)
+			   RETURNING id`
+
+	transationID := int64(0)
+	err = tx.QueryRowContext(ctx, query6, u.ID, fmt.Sprintf("checkout-order_id=%d", orderID), total.Neg()).Scan(&transationID)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, 0, err
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		log.Println(err)
@@ -741,7 +753,7 @@ func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
 
 	query0 := `SELECT SUM(price * quantity)
 			   FROM order_items
-			   WHERE id = $1`
+			   WHERE order_id = $1`
 
 	total := decimal.Zero
 	err := s.db.QueryRowContext(ctx, query0, order.ID).Scan(&total)
@@ -753,7 +765,9 @@ func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
 		return decimal.Zero, errors.New("total must be greater than zero")
 	}
 
-	opts := &sql.TxOptions{}
+	opts := &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+	}
 	tx, err := s.db.BeginTx(ctx, opts)
 	if err != nil {
 		return decimal.Zero, err
@@ -793,10 +807,85 @@ func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
 		tx.Rollback()
 		return decimal.Zero, err
 	}
+
+	query3 := `INSERT INTO transations(user_id, signature, amount)
+	           VALUES ($1, $2, $3)
+			   RETURNING id`
+
+	transationID := int64(0)
+	err = tx.QueryRowContext(ctx, query3, u.ID, fmt.Sprintf("cancel-order-id=%d", order.ID), total).Scan(&transationID)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, err
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		log.Println(err)
 		return decimal.Zero, err
 	}
 	return total, nil
+}
+
+func (s *Storage) GetTransationWithSignature(signature string) (*Transation, error) {
+	query := `SELECT id, user_id, amount
+	          FROM transations
+			  WHERE signature = $1`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{signature}
+	t := Transation{
+		Signature: signature,
+	}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&t.ID, &t.UserID, &t.Amount)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *Storage) TransferToUser(u *User, signature string, amount decimal.Decimal) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	opts := &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+	}
+	tx, err := s.db.BeginTx(ctx, opts)
+	if err != nil {
+		return err
+	}
+	query0 := `INSERT INTO transations(user_id, signature, amount)
+	           VALUES ($1, $2, $3)
+			   RETURNING id`
+
+	transationID := 0
+	err = tx.QueryRowContext(ctx, query0, u.ID, signature, amount).Scan(&transationID)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	query1 := `UPDATE users
+	           SET balance = balance + $1, version = version + 1
+			   WHERE id = $2 AND version = $3
+			   RETURNING version`
+
+	err = tx.QueryRowContext(ctx, query1, amount, u.ID, u.Version).Scan(&u.Version)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return err
+	}
+	return nil
 }

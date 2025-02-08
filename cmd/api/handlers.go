@@ -776,13 +776,20 @@ func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			amount := decimal.NewFromFloat(items[0].Price.UnitAmountDecimal).Div(decimal.NewFromInt(100))
-			u.Balance = u.Balance.Add(amount)
-			// TODO: We should record this in the database because we might get the same exact request multiple times for the same user...
-			err = app.storage.UpdateUser(u)
+			transationSignature := fmt.Sprintf("stripe-session-id=%v", cs.ID)
+			t, err := app.storage.GetTransationWithSignature(transationSignature)
 			if err != nil {
 				log.Println(err)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
+			}
+			if t == nil {
+				err = app.storage.TransferToUser(u, transationSignature, amount)
+				if err != nil {
+					log.Println(err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
 			}
 			log.Println("success")
 		}

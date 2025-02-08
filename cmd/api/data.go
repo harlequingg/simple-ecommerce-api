@@ -85,3 +85,10 @@ type OrderItems struct {
 	Order Order       `json:"order"`
 	Items []OrderItem `json:"items"`
 }
+
+type Transation struct {
+	ID        int64           `json:"id"`
+	UserID    int64           `json:"user_id"`
+	Signature string          `json:"signature"`
+	Amount    decimal.Decimal `json:"amount"`
+}
