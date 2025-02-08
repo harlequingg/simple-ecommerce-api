@@ -804,6 +804,141 @@ func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) 
 	writeJSON(map[string]any{"total": total, "order_id": orderID}, http.StatusOK, w)
 }
 
+func (app *Application) getOrderHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	if id <= 0 {
+		writeError(errors.New("id must be greater than zero"), http.StatusBadRequest, w)
+		return
+	}
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	order, err := app.storage.GetOrderByID(int64(id))
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if order == nil {
+		writeError(errors.New("not found"), http.StatusNotFound, w)
+		return
+	}
+	if order.UserID != u.ID {
+		writeError(errors.New("forbidden"), http.StatusForbidden, w)
+		return
+	}
+	items, err := app.storage.GetOrderItems(order.ID)
+	if err != nil || items == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	res := map[string]any{
+		"order": order,
+		"items": items,
+	}
+	writeJSON(res, http.StatusOK, w)
+}
+
+func (app *Application) getOrdersHandler(w http.ResponseWriter, r *http.Request) {
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	orders, err := app.storage.GetOrdersItems(u.ID)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if orders == nil {
+		writeError(errors.New("not found"), http.StatusNotFound, w)
+		return
+	}
+	res := map[string]any{
+		"orders": orders,
+	}
+	writeJSON(res, http.StatusOK, w)
+}
+
+func (app *Application) updateOrderHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	if id <= 0 {
+		writeError(errors.New("id must be greater than zero"), http.StatusBadRequest, w)
+		return
+	}
+	var req struct {
+		Operation *string `json:"operation"`
+	}
+	err = readJSON(r, &req)
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	v := NewValidator()
+	v.Check(req.Operation != nil, "operation", "must be provided")
+	validOperations := []string{"deliver", "cancel"}
+	if req.Operation != nil {
+		v.Check(slices.Index(validOperations, *req.Operation) != -1, "operation", "unsupported")
+	}
+	if v.HasError() {
+		writeError(v, http.StatusBadRequest, w)
+		return
+	}
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	order, err := app.storage.GetOrderByID(int64(id))
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if order == nil {
+		writeError(errors.New("not found"), http.StatusNotFound, w)
+		return
+	}
+	if order.UserID != u.ID {
+		writeError(errors.New("forbidden"), http.StatusForbidden, w)
+		return
+	}
+	if order.StatusID != int64(OrderStatusInProgress) {
+		writeError(errors.New("invalid operation"), http.StatusConflict, w)
+		return
+	}
+	// TODO: we need to make sure user has permissions to update orders
+	op := *req.Operation
+	switch op {
+	case "deliver":
+		err = app.storage.DeliverOrder(order)
+		if err != nil {
+			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			return
+		}
+		res := map[string]any{"message": "delivered"}
+		writeJSON(res, http.StatusOK, w)
+	case "cancel":
+		total, err := app.storage.CancelOrder(order)
+		if err != nil {
+			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			return
+		}
+		res := map[string]any{"message": "cancelled", "total": total}
+		writeJSON(res, http.StatusOK, w)
+	}
+}
+
 func readJSON(r *http.Request, dst any) error {
 	err := json.NewDecoder(r.Body).Decode(dst)
 	if err != nil {

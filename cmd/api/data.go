@@ -51,6 +51,14 @@ type CartItem struct {
 	Version   int32 `json:"-"`
 }
 
+type OrderStatusID int64
+
+const (
+	OrderStatusInProgress OrderStatusID = 1
+	OrderStatusDelivered  OrderStatusID = 2
+	OrderStatusCancelled  OrderStatusID = 3
+)
+
 type OrderStatus struct {
 	ID     int64  `json:"id"`
 	Status string `json:"status"`
@@ -71,4 +79,9 @@ type OrderItem struct {
 	ProductID int64           `json:"product_id"`
 	Quantity  int64           `json:"quantity"`
 	Price     decimal.Decimal `json:"price"`
+}
+
+type OrderItems struct {
+	Order Order       `json:"order"`
+	Items []OrderItem `json:"items"`
 }

@@ -590,6 +590,9 @@ func (s *Storage) GetOrderByID(ID int64) (*Order, error) {
 	args := []any{ID}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&order.UserID, &order.CreatedAt, &order.StatusID, &order.CompletedAt, &order.Version)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &order, nil
@@ -598,7 +601,8 @@ func (s *Storage) GetOrderByID(ID int64) (*Order, error) {
 func (s *Storage) GetOrders(userID int64) ([]Order, error) {
 	query := `SELECT id, created_at, status_id, completed_at, version
 	          FROM orders
-			  WHERE user_id = $1`
+			  WHERE user_id = $1
+			  ORDER BY id ASC`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -633,7 +637,8 @@ func (s *Storage) GetOrders(userID int64) ([]Order, error) {
 func (s *Storage) GetOrderItems(orderID int64) ([]OrderItem, error) {
 	query := `SELECT id, product_id, quantity, price
 	          FROM order_items
-			  WHERE order_id = $1`
+			  WHERE order_id = $1
+			  ORDER BY id ASC`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -663,4 +668,135 @@ func (s *Storage) GetOrderItems(orderID int64) ([]OrderItem, error) {
 	}
 
 	return items, nil
+}
+
+func (s *Storage) GetOrdersItems(userID int64) ([]OrderItems, error) {
+	query := `SELECT o.id, o.created_at, o.status_id, o.completed_at, o.version, i.id, i.product_id, i.quantity, i.price
+	          FROM orders as o
+			  INNER JOIN order_items as i
+			  ON i.order_id = o.id
+			  WHERE user_id = $1
+			  ORDER BY o.id ASC, i.id ASC`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var items []OrderItems
+
+	args := []any{userID}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		o := Order{}
+		i := OrderItem{}
+		err = rows.Scan(&o.ID, &o.CreatedAt, &o.StatusID, &o.CompletedAt, &o.Version, &i.ID, &i.ProductID, &i.Quantity, &i.Price)
+		if err != nil {
+			return nil, err
+		}
+		orderItems := OrderItems{
+			Order: o,
+			Items: []OrderItem{i},
+		}
+		if len(items) == 0 {
+			items = append(items, orderItems)
+		} else {
+			if items[len(items)-1].Order.ID == o.ID {
+				items[len(items)-1].Items = append(items[len(items)-1].Items, i)
+			} else {
+				items = append(items, orderItems)
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return items, nil
+}
+
+func (s *Storage) DeliverOrder(order *Order) error {
+	query := `UPDATE orders
+			  SET status_id = 2, completed_at = NOW(), version = version + 1
+			  WHERE status_id = 1 AND id = $1 AND version = $2
+			  RETURNING version`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{order.ID, order.Version}
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&order.Version)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query0 := `SELECT SUM(price * quantity)
+			   FROM order_items
+			   WHERE id = $1`
+
+	total := decimal.Zero
+	err := s.db.QueryRowContext(ctx, query0, order.ID).Scan(&total)
+	if err != nil {
+		return decimal.Zero, err
+	}
+
+	if total.LessThanOrEqual(decimal.Zero) {
+		return decimal.Zero, errors.New("total must be greater than zero")
+	}
+
+	opts := &sql.TxOptions{}
+	tx, err := s.db.BeginTx(ctx, opts)
+	if err != nil {
+		return decimal.Zero, err
+	}
+
+	query1 := `UPDATE orders
+			   SET status_id = 3, completed_at = NOW(), version = version + 1
+			   WHERE status_id = 1 AND id = $1 AND version = $2
+			   RETURNING version`
+
+	err = tx.QueryRowContext(ctx, query1, order.ID, order.Version).Scan(&order.Version)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, err
+	}
+
+	u, err := s.GetUserById(order.UserID)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, err
+	}
+	if u == nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, errors.New("user is nil")
+	}
+
+	query2 := `UPDATE users
+			   SET balance = balance + $1, version = version + 1
+			   WHERE id = $2 AND version = $3
+			   RETURNING version`
+	err = tx.QueryRowContext(ctx, query2, total, u.ID, u.Version).Scan(&u.Version)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback()
+		return decimal.Zero, err
+	}
+	err = tx.Commit()
+	if err != nil {
+		log.Println(err)
+		return decimal.Zero, err
+	}
+	return total, nil
 }

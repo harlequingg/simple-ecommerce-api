@@ -34,5 +34,9 @@ func ComposeRoutes(app *Application) http.Handler {
 	mux.HandleFunc("POST /v1/webhook", app.webhookHandler)
 	mux.HandleFunc("POST /v1/checkout", app.authenticate(app.checkoutHandler))
 
+	mux.HandleFunc("GET /v1/orders/{id}", app.authenticate(app.getOrderHandler))
+	mux.HandleFunc("GET /v1/orders", app.authenticate(app.getOrdersHandler))
+	mux.HandleFunc("PUT /v1/orders/{id}", app.authenticate(app.updateOrderHandler))
+
 	return mux
 }
