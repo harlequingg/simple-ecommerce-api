@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -91,4 +92,10 @@ type Transation struct {
 	UserID    int64           `json:"user_id"`
 	Signature string          `json:"signature"`
 	Amount    decimal.Decimal `json:"amount"`
+}
+
+type Permissions []string
+
+func (p Permissions) Has(code string) bool {
+	return slices.Index(p, code) != -1
 }

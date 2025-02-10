@@ -56,7 +56,8 @@ func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	u, err := app.storage.CreateUser(req.Name, req.Email, passwordHash)
+	permissions := []string{"products:read"}
+	u, err := app.storage.CreateUser(req.Name, req.Email, passwordHash, permissions)
 	if err != nil {
 		writeError(err, http.StatusInternalServerError, w)
 		return

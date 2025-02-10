@@ -96,9 +96,11 @@ func main() {
 				log.Println("Tokens background goroutine was shutdown gracefully")
 				return
 			case <-ticker.C:
-				err := app.storage.DeleteExpiredTokens()
+				n, err := app.storage.DeleteExpiredTokens()
 				if err != nil {
-					log.Println("Tokens background goroutine: ", err)
+					log.Println("Tokens goroutine: ", err)
+				} else {
+					log.Printf("Tokens goroutine: deleted %d tokens", n)
 				}
 			}
 		}

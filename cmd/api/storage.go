@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 	"github.com/shopspring/decimal"
 )
@@ -41,11 +42,7 @@ func NewStorage(connStr string) (*Storage, error) {
 	return &Storage{db: db}, nil
 }
 
-func (s *Storage) CreateUser(name, email string, passwordHash []byte) (*User, error) {
-	query := `INSERT INTO users(name, email, password_hash, is_activated)
-	          VALUES ($1, $2, $3, $4)
-			  RETURNING id, created_at, version`
-
+func (s *Storage) CreateUser(name, email string, passwordHash []byte, permissions Permissions) (*User, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -55,12 +52,33 @@ func (s *Storage) CreateUser(name, email string, passwordHash []byte) (*User, er
 	u.PasswordHash = passwordHash
 	u.IsActivated = false
 
-	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Version)
+	opts := &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+	}
+	tx, err := s.db.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
+	query0 := `INSERT INTO users(name, email, password_hash, is_activated)
+	           VALUES ($1, $2, $3, $4)
+			   RETURNING id, created_at, version`
 
+	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated}
+	err = tx.QueryRowContext(ctx, query0, args...).Scan(&u.ID, &u.CreatedAt, &u.Version)
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	query1 := `INSERT INTO users_permissions
+	           SELECT $1, p.id FROM permissions as p WHERE p.code = ANY($2)`
+	_, err = tx.ExecContext(ctx, query1, u.ID, pq.Array(permissions))
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	tx.Commit()
 	return &u, nil
 }
 
@@ -205,15 +223,22 @@ func (s *Storage) DeleteTokensForUser(userID int64, scope TokenScope) error {
 	return err
 }
 
-func (s *Storage) DeleteExpiredTokens() error {
+func (s *Storage) DeleteExpiredTokens() (int, error) {
 	query := `DELETE FROM tokens
 			  WHERE NOW() > expires_at`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := s.db.ExecContext(ctx, query)
-	return err
+	result, err := s.db.ExecContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, quantity int64) (*Product, error) {
@@ -888,4 +913,49 @@ func (s *Storage) TransferToUser(u *User, signature string, amount decimal.Decim
 		return err
 	}
 	return nil
+}
+
+func (s *Storage) GetUserPermissions(userID int64) (Permissions, error) {
+	query := `SELECT p.code
+	          FROM permissions as p
+			  INNER JOIN users_permissions as up ON p.id = up.permission_id
+			  INNER JOIN users as u ON u.id = up.user_id
+			  WHERE u.id = $1`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	args := []any{userID}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	var p Permissions
+
+	for rows.Next() {
+		var code string
+		err = rows.Scan(&code)
+		if err != nil {
+			return nil, err
+		}
+		p = append(p, code)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return p, nil
+}
+
+func (s *Storage) GrantPermissions(userID int64, codes ...string) error {
+	query := `INSERT INTO users_permissions
+	          SELECT $1, p.id FROM permissions as p WHERE p.code = ANY($2)`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.db.ExecContext(ctx, query, pq.Array(codes))
+	return err
 }

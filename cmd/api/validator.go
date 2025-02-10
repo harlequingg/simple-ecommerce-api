@@ -47,7 +47,7 @@ func (v *Validator) HasError() bool {
 }
 
 func (v *Validator) Error() string {
-	data, err := json.Marshal(v.violations)
+	data, err := json.MarshalIndent(v.violations, "", "")
 	if err != nil {
 		log.Println(err)
 		return ""
