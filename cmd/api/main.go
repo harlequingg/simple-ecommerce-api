@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,6 +34,9 @@ type Config struct {
 		maxRequestPerSecond float64
 		burst               int
 		enabled             bool
+	}
+	cors struct {
+		trustedOrigins []string
 	}
 }
 
@@ -79,7 +83,12 @@ func main() {
 	flag.IntVar(&cfg.limiter.burst, "limiter-burst", 4, "Rate Limiter max burst")
 	flag.BoolVar(&cfg.limiter.enabled, "limiter-enabled", true, "Enable rate limiter")
 
+	var trustedOrigins string
+	flag.StringVar(&trustedOrigins, "cors-trusted-origins", "*", "Trusted CORS origins saperated by space")
+
 	flag.Parse()
+
+	cfg.cors.trustedOrigins = strings.Fields(trustedOrigins)
 
 	storage, err := NewStorage(cfg.db.dsn)
 	if err != nil {

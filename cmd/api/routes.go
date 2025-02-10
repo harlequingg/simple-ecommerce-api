@@ -41,8 +41,8 @@ func ComposeRoutes(app *Application) http.Handler {
 	mux.HandleFunc("PUT /v1/orders/{id}", app.authenticate(app.updateOrderHandler))
 
 	if app.config.limiter.enabled {
-		return app.rateLimit(mux)
+		return app.enableCORS(app.recoverFromPanic(app.rateLimit(mux)))
 	}
 
-	return mux
+	return app.enableCORS(app.recoverFromPanic(mux))
 }
