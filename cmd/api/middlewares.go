@@ -4,8 +4,14 @@ import (
 	"context"
 	"encoding/base32"
 	"errors"
+	"log"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type userContextKey string
@@ -71,6 +77,71 @@ func (app *Application) requirePermission(code string, next http.HandlerFunc) ht
 			writeError(errors.New("you don't have permission to access this resource"), http.StatusForbidden, w)
 			return
 		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func (app *Application) requireUserActivation(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u := getUserFromRequest(r)
+		if u == nil {
+			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			return
+		}
+		if !u.IsActivated {
+			writeError(errors.New("your user account must be activated to access this resource"), http.StatusForbidden, w)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+func (app *Application) rateLimit(next http.Handler) http.HandlerFunc {
+	type client struct {
+		limiter  *rate.Limiter
+		lastSeen time.Time
+	}
+	var (
+		mu      sync.RWMutex
+		clients = make(map[string]client)
+	)
+	go func() {
+		for {
+			time.Sleep(time.Minute)
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				for ip, client := range clients {
+					if time.Since(client.lastSeen) >= time.Minute*3 {
+						delete(clients, ip)
+					}
+				}
+			}()
+		}
+	}()
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			log.Println(err)
+			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			return
+		}
+		mu.Lock()
+		c, ok := clients[ip]
+		if !ok {
+			l := rate.NewLimiter(rate.Limit(app.config.limiter.maxRequestPerSecond), app.config.limiter.burst)
+			c = client{
+				limiter: l,
+			}
+		}
+		c.lastSeen = time.Now()
+		clients[ip] = c
+		if !c.limiter.Allow() {
+			mu.Unlock()
+			writeError(errors.New("rate limit exceeded"), http.StatusTooManyRequests, w)
+			return
+		}
+		mu.Unlock()
 		next.ServeHTTP(w, r)
 	}
 }

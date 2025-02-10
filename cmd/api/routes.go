@@ -40,5 +40,9 @@ func ComposeRoutes(app *Application) http.Handler {
 	mux.HandleFunc("GET /v1/orders", app.authenticate(app.getOrdersHandler))
 	mux.HandleFunc("PUT /v1/orders/{id}", app.authenticate(app.updateOrderHandler))
 
+	if app.config.limiter.enabled {
+		return app.rateLimit(mux)
+	}
+
 	return mux
 }

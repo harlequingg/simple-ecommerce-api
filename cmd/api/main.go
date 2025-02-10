@@ -29,6 +29,11 @@ type Config struct {
 		password string
 		sender   string
 	}
+	limiter struct {
+		maxRequestPerSecond float64
+		burst               int
+		enabled             bool
+	}
 }
 
 type Application struct {
@@ -69,6 +74,11 @@ func main() {
 	flag.StringVar(&cfg.smtp.username, "smtp-username", os.Getenv("SMTP_USERNAME"), "SMTP host")
 	flag.StringVar(&cfg.smtp.password, "smtp-password", os.Getenv("SMTP_PASSWORD"), "SMTP password")
 	flag.StringVar(&cfg.smtp.sender, "smtp-sender", os.Getenv("SMTP_SENDER"), "SMTP sender")
+
+	flag.Float64Var(&cfg.limiter.maxRequestPerSecond, "limiter-max-rps", 2, "Rate Limiter max requests per second")
+	flag.IntVar(&cfg.limiter.burst, "limiter-burst", 4, "Rate Limiter max burst")
+	flag.BoolVar(&cfg.limiter.enabled, "limiter-enabled", true, "Enable rate limiter")
+
 	flag.Parse()
 
 	storage, err := NewStorage(cfg.db.dsn)
