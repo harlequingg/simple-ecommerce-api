@@ -22,11 +22,19 @@ type Config struct {
 	db          struct {
 		dsn string
 	}
+	smtp struct {
+		host     string
+		port     int
+		username string
+		password string
+		sender   string
+	}
 }
 
 type Application struct {
 	config  Config
 	storage *Storage
+	mailer  *Mailer
 }
 
 const (
@@ -52,6 +60,15 @@ func main() {
 	flag.IntVar(&cfg.port, "port", defaultPort, "Listen port of the Server")
 	flag.StringVar(&cfg.environment, "env", defaultEnv, `Environment ("development" or "production")`)
 	flag.StringVar(&cfg.db.dsn, "db-dsn", os.Getenv("DB_DSN"), "Database DSN")
+	smtpPort, err := strconv.Atoi(os.Getenv("SMTP_PORT"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	flag.IntVar(&cfg.smtp.port, "smtp-port", smtpPort, "SMTP port")
+	flag.StringVar(&cfg.smtp.username, "smtp-username", os.Getenv("SMTP_USERNAME"), "SMTP host")
+	flag.StringVar(&cfg.smtp.password, "smtp-password", os.Getenv("SMTP_PASSWORD"), "SMTP password")
+	flag.StringVar(&cfg.smtp.sender, "smtp-sender", os.Getenv("SMTP_SENDER"), "SMTP sender")
 	flag.Parse()
 
 	storage, err := NewStorage(cfg.db.dsn)
@@ -64,6 +81,7 @@ func main() {
 	app := &Application{
 		config:  cfg,
 		storage: storage,
+		mailer:  NewMailer(cfg.smtp.host, cfg.smtp.port, cfg.smtp.username, cfg.smtp.password, cfg.smtp.sender),
 	}
 
 	srv := http.Server{

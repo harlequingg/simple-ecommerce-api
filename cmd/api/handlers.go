@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"math"
@@ -20,6 +22,9 @@ import (
 	"github.com/stripe/stripe-go/webhook"
 	"golang.org/x/crypto/bcrypt"
 )
+
+//go:embed templates
+var templates embed.FS
 
 func (app *Application) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	res := struct {
@@ -62,7 +67,31 @@ func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request
 		writeError(err, http.StatusInternalServerError, w)
 		return
 	}
-	writeJSON(u, http.StatusCreated, w)
+
+	token, err := app.storage.CreateToken(u.ID, 5*time.Minute, ScopeActivation)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
+	go func(email string, token Token) {
+		tmpl, err := template.ParseFS(templates, "templates/*.gotmpl")
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		err = app.mailer.Send(email, tmpl, map[string]any{"token": token.Text})
+		if err != nil {
+			log.Println(err)
+		}
+	}(req.Email, *token)
+
+	res := map[string]any{
+		"message": fmt.Sprintf("an activation token was sent to email %s", req.Email),
+		"user":    u,
+	}
+	writeJSON(res, http.StatusCreated, w)
 }
 
 func (app *Application) getUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +207,92 @@ func (app *Application) createAuthenticationTokenHandler(w http.ResponseWriter, 
 	}
 
 	writeJSON(token, http.StatusCreated, w)
+}
+
+func (app *Application) createUserActivationTokenHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	err := readJSON(r, &req)
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+
+	v := NewValidator()
+	v.CheckEmail(req.Email)
+	if v.HasError() {
+		writeError(v, http.StatusBadRequest, w)
+		return
+	}
+
+	u, err := app.storage.GetUserByEmail(req.Email)
+	if err != nil {
+		writeError(err, http.StatusInternalServerError, w)
+		return
+	}
+
+	if u == nil {
+		writeError(errors.New("invalid email"), http.StatusBadRequest, w)
+		return
+	}
+
+	if u.IsActivated {
+		writeError(errors.New("user is already activated"), http.StatusBadRequest, w)
+		return
+	}
+
+	token, err := app.storage.CreateToken(u.ID, 5*time.Minute, ScopeActivation)
+	if err != nil {
+		log.Println(err)
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+
+	go func(email string, token Token) {
+		tmpl, err := template.ParseFS(templates, "templates/*.gotmpl")
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		err = app.mailer.Send(email, tmpl, map[string]any{"token": token.Text})
+		if err != nil {
+			log.Println(err)
+		}
+	}(req.Email, *token)
+
+	res := map[string]any{"message": fmt.Sprintf("an activation token was sent to email %s", req.Email)}
+	writeJSON(res, http.StatusCreated, w)
+}
+
+func (app *Application) activateUserHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	err := readJSON(r, &req)
+	if err != nil {
+		writeError(err, http.StatusBadRequest, w)
+		return
+	}
+	u, err := app.storage.GetUserFromToken(req.Token, ScopeActivation)
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	if u == nil {
+		writeError(errors.New("invalid token"), http.StatusBadRequest, w)
+		return
+	}
+	u.IsActivated = true
+	err = app.storage.UpdateUser(u)
+	if err != nil {
+		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		return
+	}
+	res := map[string]any{
+		"message": "user activated",
+	}
+	writeJSON(res, http.StatusOK, w)
 }
 
 func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,8 @@ func ComposeRoutes(app *Application) http.Handler {
 	mux.HandleFunc("DELETE /v1/users", app.authenticate(app.deleteUserHandler))
 
 	mux.HandleFunc("POST /v1/tokens/authentication", app.createAuthenticationTokenHandler)
+	mux.HandleFunc("POST /v1/tokens/activation", app.createUserActivationTokenHandler)
+	mux.HandleFunc("PUT /v1/tokens/activation", app.activateUserHandler)
 
 	mux.HandleFunc("POST /v1/products", app.authenticate(app.requirePermission("products:create", app.createProductHandler)))
 	mux.HandleFunc("GET /v1/products", app.authenticate(app.requirePermission("products:read", app.getProductsHandler)))
