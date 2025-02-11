@@ -8,49 +8,41 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/lib/pq"
-	_ "github.com/lib/pq"
 	"github.com/shopspring/decimal"
 )
 
 type Storage struct {
-	db *sql.DB
+	queryTimeout time.Duration
+	db           *sql.DB
 }
 
-func NewStorage(connStr string) (*Storage, error) {
-	db, err := sql.Open("postgres", connStr)
+func NewStorage(cfg Config, queryTimeout time.Duration) (*Storage, error) {
+	db, err := sql.Open("postgres", cfg.db.dsn)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: make this configurable
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(25)
-	db.SetConnMaxIdleTime(15 * time.Minute)
+	db.SetMaxOpenConns(cfg.db.maxOpenConnections)
+	db.SetMaxIdleConns(cfg.db.maxIdelConnections)
+	db.SetConnMaxIdleTime(cfg.db.maxIdelTime)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 	defer cancel()
 
 	err = db.PingContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Storage{db: db}, nil
+	return &Storage{db: db, queryTimeout: queryTimeout}, nil
 }
 
 func (s *Storage) CreateUser(name, email string, passwordHash []byte, permissions Permissions) (*User, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
 	defer cancel()
-
-	u := User{}
-	u.Name = name
-	u.Email = email
-	u.PasswordHash = passwordHash
-	u.IsActivated = false
 
 	opts := &sql.TxOptions{
 		Isolation: sql.LevelSerializable,
@@ -59,12 +51,18 @@ func (s *Storage) CreateUser(name, email string, passwordHash []byte, permission
 	if err != nil {
 		return nil, err
 	}
+
 	query0 := `INSERT INTO users(name, email, password_hash, is_activated)
 	           VALUES ($1, $2, $3, $4)
 			   RETURNING id, created_at, version`
 
-	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated}
-	err = tx.QueryRowContext(ctx, query0, args...).Scan(&u.ID, &u.CreatedAt, &u.Version)
+	u := User{}
+	u.Name = name
+	u.Email = email
+	u.PasswordHash = passwordHash
+	u.IsActivated = false
+
+	err = tx.QueryRowContext(ctx, query0, u.Name, u.Email, u.PasswordHash, u.IsActivated).Scan(&u.ID, &u.CreatedAt, &u.Version)
 	if err != nil {
 		tx.Rollback()
 		return nil, err
@@ -72,23 +70,23 @@ func (s *Storage) CreateUser(name, email string, passwordHash []byte, permission
 
 	query1 := `INSERT INTO users_permissions
 	           SELECT $1, p.id FROM permissions as p WHERE p.code = ANY($2)`
+
 	_, err = tx.ExecContext(ctx, query1, u.ID, pq.Array(permissions))
 	if err != nil {
 		tx.Rollback()
 		return nil, err
 	}
-
 	tx.Commit()
 	return &u, nil
 }
 
 func (s *Storage) GetUserById(id int64) (*User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT created_at, name, email, password_hash, is_activated, balance, version
 			  FROM users
 			  WHERE id = $1`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	u := User{}
 	u.ID = id
@@ -106,12 +104,12 @@ func (s *Storage) GetUserById(id int64) (*User, error) {
 }
 
 func (s *Storage) GetUserByEmail(email string) (*User, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT id, created_at, name, password_hash, is_activated, balance, version
 			  FROM users
 			  WHERE email = $1`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	u := User{}
 	u.Email = email
@@ -129,14 +127,13 @@ func (s *Storage) GetUserByEmail(email string) (*User, error) {
 }
 
 func (s *Storage) UpdateUser(u *User) error {
-	log.Println(u.Balance)
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `UPDATE users
 			  SET name = $1, email = $2, password_hash = $3, is_activated = $4, balance = $5, version = version + 1  
 			  WHERE id = $6 AND version = $7 
 			  RETURNING version`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{u.Name, u.Email, u.PasswordHash, u.IsActivated, u.Balance, u.ID, u.Version}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.Version)
@@ -147,11 +144,11 @@ func (s *Storage) UpdateUser(u *User) error {
 }
 
 func (s *Storage) DeleteUser(u *User) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `DELETE FROM users
 			  WHERE id = $1`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{u.ID}
 	_, err := s.db.ExecContext(ctx, query, args...)
@@ -159,6 +156,9 @@ func (s *Storage) DeleteUser(u *User) error {
 }
 
 func (s *Storage) CreateToken(userID int64, duration time.Duration, scope TokenScope) (*Token, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	b := make([]byte, 16)
 	_, err := rand.Read(b)
 	if err != nil {
@@ -168,12 +168,10 @@ func (s *Storage) CreateToken(userID int64, duration time.Duration, scope TokenS
 	text := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)
 	hash := sha256.Sum256([]byte(text))
 	expires_at := time.Now().Add(duration)
+
 	query := `INSERT INTO tokens(hash, user_id, expires_at, scope)
 			  VALUES ($1, $2, $3, $4)
 			  RETURNING id`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	t := &Token{
 		Text:      text,
@@ -192,31 +190,35 @@ func (s *Storage) CreateToken(userID int64, duration time.Duration, scope TokenS
 }
 
 func (s *Storage) GetUserFromToken(text string, scope TokenScope) (*User, error) {
-	hash := sha256.Sum256([]byte(text))
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT u.id, u.created_at, u.name, u.email, u.password_hash, u.is_activated, u.balance, u.version
 			  FROM users as u
 			  INNER JOIN tokens as t
 			  on u.id = t.user_id
 			  WHERE t.hash = $1 AND t.scope = $2 AND t.expires_at > NOW()`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	var u User
 
+	hash := sha256.Sum256([]byte(text))
 	args := []any{hash[:], scope}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&u.ID, &u.CreatedAt, &u.Name, &u.Email, &u.PasswordHash, &u.IsActivated, &u.Balance, &u.Version)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &u, nil
 }
 
 func (s *Storage) DeleteTokensForUser(userID int64, scope TokenScope) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `DELETE FROM tokens
 			  WHERE user_id = $1 AND scope = $2`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{userID, scope}
 	_, err := s.db.ExecContext(ctx, query, args...)
@@ -224,11 +226,11 @@ func (s *Storage) DeleteTokensForUser(userID int64, scope TokenScope) error {
 }
 
 func (s *Storage) DeleteExpiredTokens() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `DELETE FROM tokens
 			  WHERE NOW() > expires_at`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	result, err := s.db.ExecContext(ctx, query)
 	if err != nil {
@@ -242,12 +244,12 @@ func (s *Storage) DeleteExpiredTokens() (int, error) {
 }
 
 func (s *Storage) CreateProduct(name, description string, price decimal.Decimal, quantity int64) (*Product, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `INSERT INTO products(name, description, price, quantity)
 			  VALUES ($1, $2, $3, $4)
 			  RETURNING id, created_at, updated_at, version`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	p := Product{
 		Name:        name,
@@ -265,16 +267,17 @@ func (s *Storage) CreateProduct(name, description string, price decimal.Decimal,
 }
 
 func (s *Storage) GetProductByID(id int64) (*Product, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT created_at, updated_at, name, description, price, quantity, version
 			  FROM products
 			  WHERE id = $1`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	args := []any{id}
 	p := Product{
 		ID: id,
 	}
+	args := []any{id}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.CreatedAt, &p.UpdatedAt, &p.Name, &p.Description, &p.Price, &p.Quantity, &p.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -286,6 +289,9 @@ func (s *Storage) GetProductByID(id int64) (*Product, error) {
 }
 
 func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice decimal.Decimal, page, pageSize int) ([]Product, int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	op := "ASC"
 	column := sort
 	if strings.HasPrefix(sort, "-") {
@@ -297,20 +303,26 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 		sortStr = fmt.Sprintf("%s %s, id ASC", column, op)
 	}
 	query := fmt.Sprintf(`SELECT COUNT(*) OVER(), id, created_at, updated_at, name, description, price, quantity, version
-			  FROM products
-			  WHERE ($1 = '' OR to_tsvector('simple', name) @@ plainto_tsquery('simple', $1))
-			  AND ($2 = '' OR to_tsvector('simple', description) @@ plainto_tsquery('simple', $2))
-			  AND (price BETWEEN $3 AND $4)
-			  ORDER BY %s
-			  LIMIT $5 OFFSET $6`, sortStr)
+			              FROM products
+			              WHERE ($1 = '' OR to_tsvector('simple', name) @@ plainto_tsquery('simple', $1))
+			              AND ($2 = '' OR to_tsvector('simple', description) @@ plainto_tsquery('simple', $2))
+			              AND (price BETWEEN $3 AND $4)
+			              ORDER BY %s
+			              LIMIT $5 OFFSET $6`, sortStr)
 	limit := pageSize
 	offset := (page - 1) * pageSize
+
 	args := []any{name, description, minPrice, maxPrice, limit, offset}
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, 0, nil
+		}
 		return nil, 0, err
 	}
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close()
+	}()
 	total := 0
 	products := []Product{}
 	for rows.Next() {
@@ -328,13 +340,13 @@ func (s *Storage) GetProducts(name, description, sort string, minPrice, maxPrice
 }
 
 func (s *Storage) UpdateProduct(p *Product) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `UPDATE products
 	          SET name = $1, description = $2, price = $3, quantity = $4, updated_at = NOW(), version = version + 1
 			  WHERE id = $5 AND version = $6
 			  RETURNING version`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{p.Name, p.Description, p.Price, p.Quantity, p.ID, p.Version}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&p.Version)
@@ -345,11 +357,11 @@ func (s *Storage) UpdateProduct(p *Product) error {
 }
 
 func (s *Storage) DeleteProduct(p *Product) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `DELETE FROM products
 			  WHERE id = $1`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{p.ID}
 	_, err := s.db.ExecContext(ctx, query, args...)
@@ -357,18 +369,20 @@ func (s *Storage) DeleteProduct(p *Product) error {
 }
 
 func (s *Storage) CreateCartItem(productID int64, userID int64, quantity int64) (*CartItem, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `INSERT INTO cart_items(product_id, user_id, quantity)
 			  VALUES ($1, $2, $3)
 			  RETURNING id`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	args := []any{productID, userID, quantity}
 	c := CartItem{
 		ProductID: productID,
 		UserID:    userID,
 		Quantity:  quantity,
 	}
+
+	args := []any{productID, userID, quantity}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&c.ID)
 	if err != nil {
 		return nil, err
@@ -377,16 +391,18 @@ func (s *Storage) CreateCartItem(productID int64, userID int64, quantity int64) 
 }
 
 func (s *Storage) GetCartItemById(cartItemID int64) (*CartItem, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT product_id, user_id, quantity, version
 			  FROM cart_items
 			  WHERE id = $1`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	args := []any{cartItemID}
 	item := CartItem{
 		ID: cartItemID,
 	}
+
+	args := []any{cartItemID}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&item.ProductID, &item.UserID, &item.Quantity, &item.Version)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -398,16 +414,23 @@ func (s *Storage) GetCartItemById(cartItemID int64) (*CartItem, error) {
 }
 
 func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT id, product_id, quantity, version
 			  FROM cart_items
 			  WHERE user_id = $1
 			  ORDER BY id ASC`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{userID}
 	rows, err := s.db.QueryContext(ctx, query, args...)
+	defer func() {
+		_ = rows.Close()
+	}()
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	cartItems := []CartItem{}
@@ -428,12 +451,14 @@ func (s *Storage) GetCartItems(userID int64) ([]CartItem, error) {
 }
 
 func (s *Storage) UpdateCartItem(cartItem *CartItem) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `UPDATE cart_items
 			  SET quantity = $1, version = version + 1
 			  WHERE id = $2 AND version = $3
 			  RETURNING version`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+
 	args := []any{cartItem.Quantity, cartItem.ID, cartItem.Version}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&cartItem.Version)
 	if err != nil {
@@ -443,10 +468,12 @@ func (s *Storage) UpdateCartItem(cartItem *CartItem) error {
 }
 
 func (s *Storage) DeleteCartItem(cartItem *CartItem) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `DELETE FROM cart_items
 			  WHERE id = $1`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+
 	args := []any{cartItem.ID}
 	_, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -456,10 +483,11 @@ func (s *Storage) DeleteCartItem(cartItem *CartItem) error {
 }
 
 func (s *Storage) DeleteCartItems(userID int64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `DELETE FROM cart_items
 			  WHERE user_id = $1`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	args := []any{userID}
 	_, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -469,14 +497,14 @@ func (s *Storage) DeleteCartItems(userID int64) error {
 }
 
 func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
 	defer cancel()
+
 	ops := &sql.TxOptions{
 		Isolation: sql.LevelSerializable,
 	}
 	tx, err := s.db.BeginTx(ctx, ops)
 	if err != nil {
-		log.Println(err)
 		return decimal.Zero, 0, err
 	}
 	query0 := `SELECT c.id, c.quantity, c.version, p.id, p.name, p.price, p.quantity, p.version 
@@ -487,11 +515,12 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 
 	rows, err := tx.QueryContext(ctx, query0, u.ID)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, 0, err
 	}
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close()
+	}()
 
 	type cartItemCheckout struct {
 		ID       int64
@@ -507,7 +536,6 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 		p := &item.Product
 		err := rows.Scan(&item.ID, &item.Quantity, &item.Version, &p.ID, &p.Name, &p.Price, &p.Quantity, &p.Version)
 		if err != nil {
-			log.Println(err)
 			tx.Rollback()
 			return decimal.Zero, 0, err
 		}
@@ -540,7 +568,6 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 	for _, item := range items {
 		_, err = tx.ExecContext(ctx, query1, item.Quantity, item.Product.ID, item.Product.Version)
 		if err != nil {
-			log.Println(err)
 			tx.Rollback()
 			return decimal.Zero, 0, err
 		}
@@ -552,7 +579,6 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 
 	_, err = tx.ExecContext(ctx, query2, total, u.ID, u.Version)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, 0, err
 	}
@@ -564,7 +590,6 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 	orderID := int64(0)
 	err = tx.QueryRowContext(ctx, query3, u.ID).Scan(&orderID)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, 0, err
 	}
@@ -575,7 +600,6 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 	for _, item := range items {
 		_, err = tx.ExecContext(ctx, query4, orderID, item.Product.ID, item.Quantity, item.Product.Price)
 		if err != nil {
-			log.Println(err)
 			tx.Rollback()
 			return decimal.Zero, 0, err
 		}
@@ -586,7 +610,6 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 
 	_, err = tx.ExecContext(ctx, query5, u.ID)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, 0, err
 	}
@@ -598,14 +621,12 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 	transationID := int64(0)
 	err = tx.QueryRowContext(ctx, query6, u.ID, fmt.Sprintf("checkout-order_id=%d", orderID), total.Neg()).Scan(&transationID)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, 0, err
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		log.Println(err)
 		return decimal.Zero, 0, err
 	}
 
@@ -613,17 +634,16 @@ func (s *Storage) CheckoutCart(u *User) (decimal.Decimal, int64, error) {
 }
 
 func (s *Storage) GetOrderByID(ID int64) (*Order, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT user_id, created_at, status_id, completed_at, version
 	          FROM orders
 			  WHERE id = $1`
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	order := Order{
 		ID: ID,
 	}
-
 	args := []any{ID}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&order.UserID, &order.CreatedAt, &order.StatusID, &order.CompletedAt, &order.Version)
 	if err != nil {
@@ -636,22 +656,29 @@ func (s *Storage) GetOrderByID(ID int64) (*Order, error) {
 }
 
 func (s *Storage) GetOrders(userID int64) ([]Order, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT id, created_at, status_id, completed_at, version
 	          FROM orders
 			  WHERE user_id = $1
 			  ORDER BY id ASC`
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var orders []Order
-
 	args := []any{userID}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
+
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var orders []Order
 
 	for rows.Next() {
 		order := Order{
@@ -672,22 +699,28 @@ func (s *Storage) GetOrders(userID int64) ([]Order, error) {
 }
 
 func (s *Storage) GetOrderItems(orderID int64) ([]OrderItem, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT id, product_id, quantity, price
 	          FROM order_items
 			  WHERE order_id = $1
 			  ORDER BY id ASC`
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var items []OrderItem
-
 	args := []any{orderID}
 	rows, err := s.db.QueryContext(ctx, query, args...)
-
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
+
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var items []OrderItem
 
 	for rows.Next() {
 		item := OrderItem{
@@ -708,6 +741,9 @@ func (s *Storage) GetOrderItems(orderID int64) ([]OrderItem, error) {
 }
 
 func (s *Storage) GetOrdersItems(userID int64) ([]OrderItems, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT o.id, o.created_at, o.status_id, o.completed_at, o.version, i.id, i.product_id, i.quantity, i.price
 	          FROM orders as o
 			  INNER JOIN order_items as i
@@ -715,17 +751,19 @@ func (s *Storage) GetOrdersItems(userID int64) ([]OrderItems, error) {
 			  WHERE user_id = $1
 			  ORDER BY o.id ASC, i.id ASC`
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var items []OrderItems
-
 	args := []any{userID}
 	rows, err := s.db.QueryContext(ctx, query, args...)
-
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var items []OrderItems
 
 	for rows.Next() {
 		o := Order{}
@@ -757,12 +795,13 @@ func (s *Storage) GetOrdersItems(userID int64) ([]OrderItems, error) {
 }
 
 func (s *Storage) DeliverOrder(order *Order) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `UPDATE orders
 			  SET status_id = 2, completed_at = NOW(), version = version + 1
 			  WHERE status_id = 1 AND id = $1 AND version = $2
 			  RETURNING version`
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{order.ID, order.Version}
 	err := s.db.QueryRowContext(ctx, query, args...).Scan(&order.Version)
@@ -773,7 +812,7 @@ func (s *Storage) DeliverOrder(order *Order) error {
 }
 
 func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
 	defer cancel()
 
 	query0 := `SELECT SUM(price * quantity)
@@ -805,19 +844,16 @@ func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
 
 	err = tx.QueryRowContext(ctx, query1, order.ID, order.Version).Scan(&order.Version)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, err
 	}
 
 	u, err := s.GetUserById(order.UserID)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, err
 	}
 	if u == nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, errors.New("user is nil")
 	}
@@ -828,7 +864,6 @@ func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
 			   RETURNING version`
 	err = tx.QueryRowContext(ctx, query2, total, u.ID, u.Version).Scan(&u.Version)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, err
 	}
@@ -840,26 +875,24 @@ func (s *Storage) CancelOrder(order *Order) (decimal.Decimal, error) {
 	transationID := int64(0)
 	err = tx.QueryRowContext(ctx, query3, u.ID, fmt.Sprintf("cancel-order-id=%d", order.ID), total).Scan(&transationID)
 	if err != nil {
-		log.Println(err)
 		tx.Rollback()
 		return decimal.Zero, err
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		log.Println(err)
 		return decimal.Zero, err
 	}
 	return total, nil
 }
 
 func (s *Storage) GetTransationWithSignature(signature string) (*Transation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
+	defer cancel()
+
 	query := `SELECT id, user_id, amount
 	          FROM transations
 			  WHERE signature = $1`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	args := []any{signature}
 	t := Transation{
@@ -876,7 +909,7 @@ func (s *Storage) GetTransationWithSignature(signature string) (*Transation, err
 }
 
 func (s *Storage) TransferToUser(u *User, signature string, amount decimal.Decimal) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), s.queryTimeout)
 	defer cancel()
 
 	opts := &sql.TxOptions{
@@ -916,22 +949,27 @@ func (s *Storage) TransferToUser(u *User, signature string, amount decimal.Decim
 }
 
 func (s *Storage) GetUserPermissions(userID int64) (Permissions, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	query := `SELECT p.code
 	          FROM permissions as p
 			  INNER JOIN users_permissions as up ON p.id = up.permission_id
 			  INNER JOIN users as u ON u.id = up.user_id
 			  WHERE u.id = $1`
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	args := []any{userID}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close()
+	}()
 
 	var p Permissions
 
@@ -952,10 +990,11 @@ func (s *Storage) GetUserPermissions(userID int64) (Permissions, error) {
 }
 
 func (s *Storage) GrantPermissions(userID int64, codes ...string) error {
-	query := `INSERT INTO users_permissions
-	          SELECT $1, p.id FROM permissions as p WHERE p.code = ANY($2)`
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := s.db.ExecContext(ctx, query, pq.Array(codes))
+	query := `INSERT INTO users_permissions
+	          SELECT $1, p.id FROM permissions as p WHERE p.code = ANY($2)`
+	args := []any{pq.Array(codes)}
+	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }

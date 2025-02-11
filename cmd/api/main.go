@@ -23,7 +23,10 @@ type Config struct {
 	port        int
 	environment string
 	db          struct {
-		dsn string
+		dsn                string
+		maxOpenConnections int
+		maxIdelConnections int
+		maxIdelTime        time.Duration
 	}
 	smtp struct {
 		host     string
@@ -77,6 +80,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	flag.IntVar(&cfg.db.maxOpenConnections, "db-max-open-conns", 25, "PostgreSQL max open connections")
+	flag.IntVar(&cfg.db.maxIdelConnections, "db-max-idel-conns", 25, "PostgreSQL max idel connections")
+	var maxIdelTime string
+	flag.StringVar(&maxIdelTime, "db-max-idel-time", "15m", "PostgreSQL max connection idel time")
+
 	flag.IntVar(&cfg.smtp.port, "smtp-port", smtpPort, "SMTP port")
 	flag.StringVar(&cfg.smtp.username, "smtp-username", os.Getenv("SMTP_USERNAME"), "SMTP host")
 	flag.StringVar(&cfg.smtp.password, "smtp-password", os.Getenv("SMTP_PASSWORD"), "SMTP password")
@@ -91,9 +99,18 @@ func main() {
 
 	flag.Parse()
 
+	d, err := time.ParseDuration(maxIdelTime)
+	if err != nil {
+		cfg.db.maxIdelTime = 15 * time.Minute
+		log.Printf(`invalid value %s for flag "db-max-idel-time" defaulting to %s`, maxIdelTime, cfg.db.maxIdelTime)
+	} else {
+		cfg.db.maxIdelTime = d
+	}
+
 	cfg.cors.trustedOrigins = strings.Fields(trustedOrigins)
 
-	storage, err := NewStorage(cfg.db.dsn)
+	queryTimeout := 5 * time.Second
+	storage, err := NewStorage(cfg, queryTimeout)
 	if err != nil {
 		log.Fatal(err)
 	}
