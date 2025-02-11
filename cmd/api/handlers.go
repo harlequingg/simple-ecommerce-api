@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -27,10 +26,10 @@ import (
 var templates embed.FS
 
 func (app *Application) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	res := struct {
-		Version     string `json:"version"`
-		Environment string `json:"env"`
-	}{Version: version, Environment: app.config.environment}
+	res := map[string]any{
+		"version":     version,
+		"environment": app.config.environment,
+	}
 	writeJSON(res, http.StatusOK, w)
 }
 
@@ -51,41 +50,40 @@ func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request
 	v.CheckPassword(req.Password)
 
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		writeError(err, http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	permissions := []string{"products:read"}
 	u, err := app.storage.CreateUser(req.Name, req.Email, passwordHash, permissions)
 	if err != nil {
-		writeError(err, http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	token, err := app.storage.CreateToken(u.ID, 5*time.Minute, ScopeActivation)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
-	go func(email string, token Token) {
+	app.background(func() {
 		tmpl, err := template.ParseFS(templates, "templates/*.gotmpl")
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		err = app.mailer.Send(email, tmpl, map[string]any{"token": token.Text})
+		err = app.mailer.Send(req.Email, tmpl, map[string]any{"token": token.Text})
 		if err != nil {
-			log.Println(err)
+			log.Printf("failed to send email to %s: %v\n", req.Email, err)
 		}
-	}(req.Email, *token)
+	})
 
 	res := map[string]any{
 		"message": fmt.Sprintf("an activation token was sent to email %s", req.Email),
@@ -95,18 +93,36 @@ func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request
 }
 
 func (app *Application) getUserHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := getIDFromPathValue(r)
+	if err != nil {
+		writeBadRequest(err, w)
+		return
+	}
 	u := getUserFromRequest(r)
-	writeJSON(u, http.StatusOK, w)
+	if u.ID != int64(id) {
+		writeForbidden(w)
+		return
+	}
+	res := map[string]any{
+		"user": u,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := getIDFromPathValue(r)
+	if err != nil {
+		writeBadRequest(err, w)
+		return
+	}
+
 	var req struct {
 		Name     *string `json:"name"`
 		Email    *string `json:"email"`
 		Password *string `json:"password"`
 	}
 	if err := readJSON(r, &req); err != nil {
-		writeError(err, http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 
@@ -123,11 +139,20 @@ func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	u := getUserFromRequest(r)
+	if u == nil {
+		writeServerError(w)
+		return
+	}
+
+	if u.ID != int64(id) {
+		writeForbidden(w)
+		return
+	}
 
 	if req.Name != nil {
 		u.Name = *req.Name
@@ -140,27 +165,47 @@ func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request
 	if req.Password != nil {
 		passwordHash, err := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
 		if err != nil {
-			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			writeServerError(w)
 			return
 		}
 		u.PasswordHash = passwordHash
 	}
 
-	err := app.storage.UpdateUser(u)
+	err = app.storage.UpdateUser(u)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(u, http.StatusOK, w)
+	res := map[string]any{
+		"user": u,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) deleteUserHandler(w http.ResponseWriter, r *http.Request) {
-	u := getUserFromRequest(r)
-	err := app.storage.DeleteUser(u)
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeBadRequest(err, w)
+		return
 	}
+	u := getUserFromRequest(r)
+	if u == nil {
+		writeServerError(w)
+		return
+	}
+	if id != int(u.ID) {
+		writeForbidden(w)
+		return
+	}
+	err = app.storage.DeleteUser(u)
+	if err != nil {
+		writeServerError(w)
+		return
+	}
+	res := map[string]any{
+		"message": "user deleted successfully",
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) createAuthenticationTokenHandler(w http.ResponseWriter, r *http.Request) {
@@ -201,8 +246,7 @@ func (app *Application) createAuthenticationTokenHandler(w http.ResponseWriter, 
 
 	token, err := app.storage.CreateToken(u.ID, 24*time.Hour, ScopeAuthentication)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
@@ -215,37 +259,36 @@ func (app *Application) createUserActivationTokenHandler(w http.ResponseWriter, 
 	}
 	err := readJSON(r, &req)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 
 	v := NewValidator()
 	v.CheckEmail(req.Email)
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	u, err := app.storage.GetUserByEmail(req.Email)
 	if err != nil {
-		writeError(err, http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	if u == nil {
-		writeError(errors.New("invalid email"), http.StatusBadRequest, w)
+		writeBadRequest(errors.New("invalid email"), w)
 		return
 	}
 
 	if u.IsActivated {
-		writeError(errors.New("user is already activated"), http.StatusBadRequest, w)
+		writeError(errors.New("user is already activated"), http.StatusConflict, w)
 		return
 	}
 
 	token, err := app.storage.CreateToken(u.ID, 5*time.Minute, ScopeActivation)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
@@ -261,7 +304,9 @@ func (app *Application) createUserActivationTokenHandler(w http.ResponseWriter, 
 		}
 	}(req.Email, *token)
 
-	res := map[string]any{"message": fmt.Sprintf("an activation token was sent to email %s", req.Email)}
+	res := map[string]any{
+		"message": fmt.Sprintf("an activation token was sent to email %s", req.Email),
+	}
 	writeJSON(res, http.StatusCreated, w)
 }
 
@@ -269,30 +314,29 @@ func (app *Application) activateUserHandler(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		Token string `json:"token"`
 	}
-	err := readJSON(r, &req)
-	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
+	if err := readJSON(r, &req); err != nil {
+		writeBadRequest(err, w)
 		return
 	}
 	u, err := app.storage.GetUserFromToken(req.Token, ScopeActivation)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if u == nil {
-		writeError(errors.New("invalid token"), http.StatusBadRequest, w)
+		writeBadRequest(errors.New("invalid token"), w)
 		return
 	}
 	u.IsActivated = true
 	err = app.storage.UpdateUser(u)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	res := map[string]any{
 		"message": "user activated",
 	}
-	writeJSON(res, http.StatusOK, w)
+	writeOK(res, w)
 }
 
 func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Request) {
@@ -302,9 +346,9 @@ func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Requ
 		Price       decimal.Decimal `json:"price"`
 		Quantity    int64           `json:"quantity"`
 	}
-	err := readJSON(r, &req)
-	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
+
+	if err := readJSON(r, &req); err != nil {
+		writeBadRequest(err, w)
 		return
 	}
 
@@ -316,45 +360,46 @@ func (app *Application) createProductHandler(w http.ResponseWriter, r *http.Requ
 	v.Check(req.Quantity >= 0, "quantity", "must be greater than or equal zero")
 
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	p, err := app.storage.CreateProduct(req.Name, req.Description, req.Price, req.Quantity)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(p, http.StatusCreated, w)
+	res := map[string]any{
+		"product": p,
+	}
+	writeJSON(res, http.StatusCreated, w)
 }
 
 func (app *Application) getProductHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	if id < 0 {
-		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 	p, err := app.storage.GetProductByID(int64(id))
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if p == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
-	writeJSON(p, http.StatusOK, w)
+	res := map[string]any{
+		"product": p,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) getProductsHandler(w http.ResponseWriter, r *http.Request) {
@@ -422,27 +467,26 @@ func (app *Application) getProductsHandler(w http.ResponseWriter, r *http.Reques
 	v.Check(slices.Index(sortOptions, sort) != -1, sort, "search option is not supported")
 
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	products, total, err := app.storage.GetProducts(name, description, sort, minPrice, maxPrice, page, pageSize)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(map[string]any{"products": products, "total": total}, http.StatusOK, w)
+	res := map[string]any{
+		"product": products,
+		"total":   total,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	if id < 0 {
-		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 	var req struct {
@@ -451,8 +495,7 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 		Price       *decimal.Decimal `json:"price"`
 		Quantity    *int64           `json:"quantity"`
 	}
-	err = readJSON(r, &req)
-	if err != nil {
+	if err := readJSON(r, &req); err != nil {
 		writeError(err, http.StatusBadRequest, w)
 		return
 	}
@@ -472,24 +515,23 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 		v.Check(*req.Quantity >= 0, "quantity", "must be greater than or equal zero")
 	}
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	p, err := app.storage.GetProductByID(int64(id))
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if p == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	if req.Name != nil {
@@ -506,45 +548,46 @@ func (app *Application) updateProductHandler(w http.ResponseWriter, r *http.Requ
 	}
 	err = app.storage.UpdateProduct(p)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(p, http.StatusOK, w)
+	res := map[string]any{
+		"product": p,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) deleteProductHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-
-	if id < 0 {
-		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	p, err := app.storage.GetProductByID(int64(id))
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if p == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	err = app.storage.DeleteProduct(p)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(map[string]any{"message": "resource deleted successfully"}, http.StatusOK, w)
+	res := map[string]any{
+		"message": "resource deleted successfully",
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Request) {
@@ -552,9 +595,8 @@ func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Req
 		ProductID int64 `json:"product_id"`
 		Quantity  int64 `json:"Quantity"`
 	}
-	err := readJSON(r, &req)
-	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
+	if err := readJSON(r, &req); err != nil {
+		writeBadRequest(err, w)
 		return
 	}
 
@@ -563,25 +605,24 @@ func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Req
 	v.Check(req.Quantity > 0, "quantity", "must be greater than zero")
 
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	p, err := app.storage.GetProductByID(req.ProductID)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	if p == nil {
-		writeError(fmt.Errorf("product with id: %d doesn't exist", req.ProductID), http.StatusInternalServerError, w)
+		writeNotFound(w)
 		return
 	}
 
@@ -590,80 +631,79 @@ func (app *Application) createCartItemHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	if req.Quantity == 0 {
-		writeError(fmt.Errorf("product with id: %d is out of stock", req.ProductID), http.StatusInternalServerError, w)
+		writeError(fmt.Errorf("product id %d is out of stock", req.ProductID), http.StatusBadRequest, w)
 		return
 	}
 
 	cartItem, err := app.storage.CreateCartItem(req.ProductID, u.ID, req.Quantity)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
-	writeJSON(cartItem, http.StatusCreated, w)
+	res := map[string]any{
+		"item": cartItem,
+	}
+	writeJSON(res, http.StatusCreated, w)
 }
 
 func (app *Application) getCartItem(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	if id < 0 {
-		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	item, err := app.storage.GetCartItemById(int64(id))
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if item == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	if item.UserID != u.ID {
-		writeError(errors.New("access denied"), http.StatusForbidden, w)
+		writeForbidden(w)
 		return
 	}
-	writeJSON(item, http.StatusOK, w)
+	res := map[string]any{
+		"item": item,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) getCartItems(w http.ResponseWriter, r *http.Request) {
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	items, err := app.storage.GetCartItems(int64(u.ID))
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(map[string]any{"items": items}, http.StatusOK, w)
+	res := map[string]any{
+		"items": items,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	if id < 0 {
-		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 	var req struct {
 		Quantity *int64 `json:"quantity"`
 	}
-	err = readJSON(r, &req)
-	if err != nil {
+	if err = readJSON(r, &req); err != nil {
 		writeError(err, http.StatusBadRequest, w)
 		return
 	}
@@ -671,87 +711,90 @@ func (app *Application) updateCartItem(w http.ResponseWriter, r *http.Request) {
 	v.Check(req.Quantity != nil, "quantity", "must be provided")
 	v.Check(*req.Quantity > 0, "quantity", "must be greater than zero")
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	item, err := app.storage.GetCartItemById(int64(id))
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if item == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	if item.UserID != u.ID {
-		writeError(errors.New("access denied"), http.StatusForbidden, w)
+		writeForbidden(w)
 		return
 	}
 	item.Quantity = *req.Quantity
 	err = app.storage.UpdateCartItem(item)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(item, http.StatusOK, w)
+	res := map[string]any{
+		"item": item,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) deleteCartItem(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	if id < 0 {
-		writeError(errors.New("id must be a positive integer"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	item, err := app.storage.GetCartItemById(int64(id))
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if item == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	if item.UserID != u.ID {
-		writeError(errors.New("access denied"), http.StatusForbidden, w)
+		writeForbidden(w)
 		return
 	}
 	err = app.storage.DeleteCartItem(item)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(map[string]any{"message": "resource deleted successfully"}, http.StatusOK, w)
+	res := map[string]any{
+		"message": "resource deleted successfully",
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) deleteCartItems(w http.ResponseWriter, r *http.Request) {
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	err := app.storage.DeleteCartItems(u.ID)
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(map[string]any{"message": "resources deleted successfully"}, http.StatusOK, w)
+	res := map[string]any{
+		"message": "resources deleted successfully",
+	}
+	writeOK(res, w)
 }
 
 const BalanceTransfer = "BalanceTransfer"
@@ -760,8 +803,7 @@ func (app *Application) addToBalanceHandler(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		Balance *decimal.Decimal `json:"balance"`
 	}
-	err := readJSON(r, &req)
-	if err != nil {
+	if err := readJSON(r, &req); err != nil {
 		writeError(errors.New("bad request"), http.StatusBadRequest, w)
 		return
 	}
@@ -771,20 +813,20 @@ func (app *Application) addToBalanceHandler(w http.ResponseWriter, r *http.Reque
 	v.Check(req.Balance.GreaterThan(decimal.Zero), "balance", "must be greater than zero")
 
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 
 	lineItems := make([]*stripe.CheckoutSessionLineItemParams, 1)
 	price, exact := req.Balance.Mul(decimal.NewFromInt(100)).Float64()
 	if !exact {
-		writeError(errors.New("bad request"), http.StatusBadRequest, w)
+		writeBadRequest(fmt.Errorf("price %v is not exact", price), w)
 		return
 	}
 
@@ -812,14 +854,16 @@ func (app *Application) addToBalanceHandler(w http.ResponseWriter, r *http.Reque
 	}
 	s, err := session.New(params)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
-	writeJSON(map[string]any{"url": s.URL}, http.StatusCreated, w)
+	res := map[string]any{
+		"url": s.URL,
+	}
+	writeJSON(res, http.StatusCreated, w)
 }
 
-func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
+func (app *Application) balancesWebhookHandler(w http.ResponseWriter, r *http.Request) {
 	const MaxBodyBytes = int64(65536)
 	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
 
@@ -863,7 +907,7 @@ func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		items := s.LineItems.Data
 		if len(items) < 1 {
-			log.Println("bad request: len(items) must be atleast1")
+			log.Println("bad request: len(items) must be atleast 1")
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -876,18 +920,15 @@ func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			userID, err := strconv.Atoi(s.Metadata["user_id"])
 			if err != nil {
-				log.Println("bad request: ", err)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			u, err := app.storage.GetUserById(int64(userID))
 			if err != nil {
-				log.Println(err)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
 			if u == nil {
-				log.Println("user doesn't exist")
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -902,12 +943,10 @@ func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 			if t == nil {
 				err = app.storage.TransferToUser(u, transationSignature, amount)
 				if err != nil {
-					log.Println(err)
 					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
 			}
-			log.Println("success")
 		}
 	}
 }
@@ -915,96 +954,88 @@ func (app *Application) webhookHandler(w http.ResponseWriter, r *http.Request) {
 func (app *Application) checkoutHandler(w http.ResponseWriter, r *http.Request) {
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	total, orderID, err := app.storage.CheckoutCart(u)
 	if err != nil {
-		log.Println(err)
-		writeError(err, http.StatusForbidden, w)
+		writeError(err, http.StatusConflict, w)
 		return
 	}
-	writeJSON(map[string]any{"total": total, "order_id": orderID}, http.StatusOK, w)
+	res := map[string]any{
+		"total":    total,
+		"order_id": orderID,
+	}
+	writeOK(res, w)
 }
 
 func (app *Application) getOrderHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	if id <= 0 {
-		writeError(errors.New("id must be greater than zero"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	order, err := app.storage.GetOrderByID(int64(id))
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if order == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	if order.UserID != u.ID {
-		writeError(errors.New("forbidden"), http.StatusForbidden, w)
+		writeForbidden(w)
 		return
 	}
 	items, err := app.storage.GetOrderItems(order.ID)
 	if err != nil || items == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	res := map[string]any{
 		"order": order,
 		"items": items,
 	}
-	writeJSON(res, http.StatusOK, w)
+	writeOK(res, w)
 }
 
 func (app *Application) getOrdersHandler(w http.ResponseWriter, r *http.Request) {
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	orders, err := app.storage.GetOrdersItems(u.ID)
 	if err != nil {
-		log.Println(err)
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if orders == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	res := map[string]any{
 		"orders": orders,
 	}
-	writeJSON(res, http.StatusOK, w)
+	writeOK(res, w)
 }
 
 func (app *Application) updateOrderHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(r.PathValue("id"))
+	id, err := getIDFromPathValue(r)
 	if err != nil {
-		writeError(err, http.StatusBadRequest, w)
-		return
-	}
-	if id <= 0 {
-		writeError(errors.New("id must be greater than zero"), http.StatusBadRequest, w)
+		writeBadRequest(err, w)
 		return
 	}
 	var req struct {
 		Operation *string `json:"operation"`
 	}
-	err = readJSON(r, &req)
-	if err != nil {
+	if err = readJSON(r, &req); err != nil {
 		writeError(err, http.StatusBadRequest, w)
 		return
 	}
@@ -1015,29 +1046,29 @@ func (app *Application) updateOrderHandler(w http.ResponseWriter, r *http.Reques
 		v.Check(slices.Index(validOperations, *req.Operation) != -1, "operation", "unsupported")
 	}
 	if v.HasError() {
-		writeError(v, http.StatusBadRequest, w)
+		writeValidatorErrors(v, w)
 		return
 	}
 	u := getUserFromRequest(r)
 	if u == nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	order, err := app.storage.GetOrderByID(int64(id))
 	if err != nil {
-		writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+		writeServerError(w)
 		return
 	}
 	if order == nil {
-		writeError(errors.New("not found"), http.StatusNotFound, w)
+		writeNotFound(w)
 		return
 	}
 	if order.UserID != u.ID {
-		writeError(errors.New("forbidden"), http.StatusForbidden, w)
+		writeForbidden(w)
 		return
 	}
 	if order.StatusID != int64(OrderStatusInProgress) {
-		writeError(errors.New("invalid operation"), http.StatusConflict, w)
+		writeError(errors.New("invalid operation order is already completed"), http.StatusConflict, w)
 		return
 	}
 	// TODO: we need to make sure user has permissions to update orders
@@ -1046,46 +1077,18 @@ func (app *Application) updateOrderHandler(w http.ResponseWriter, r *http.Reques
 	case "deliver":
 		err = app.storage.DeliverOrder(order)
 		if err != nil {
-			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			writeServerError(w)
 			return
 		}
 		res := map[string]any{"message": "delivered"}
-		writeJSON(res, http.StatusOK, w)
+		writeOK(res, w)
 	case "cancel":
 		total, err := app.storage.CancelOrder(order)
 		if err != nil {
-			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			writeServerError(w)
 			return
 		}
 		res := map[string]any{"message": "cancelled", "total": total}
-		writeJSON(res, http.StatusOK, w)
+		writeOK(res, w)
 	}
-}
-
-func readJSON(r *http.Request, dst any) error {
-	err := json.NewDecoder(r.Body).Decode(dst)
-	if err != nil {
-		log.Println(err)
-		return err
-	}
-	return nil
-}
-
-func writeJSON(src any, status int, w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	var b bytes.Buffer
-	err := json.NewEncoder(&b).Encode(src)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	w.Write(b.Bytes())
-}
-
-func writeError(err error, status int, w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	data := map[string]any{"error": err.Error()}
-	json.NewEncoder(w).Encode(data)
 }

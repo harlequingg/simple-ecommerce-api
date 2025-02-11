@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,6 +46,7 @@ type Application struct {
 	config  Config
 	storage *Storage
 	mailer  *Mailer
+	wg      sync.WaitGroup
 }
 
 const (
@@ -138,6 +140,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		err := srv.Shutdown(ctx)
+		app.wg.Wait()
 		quit <- err
 	}()
 
