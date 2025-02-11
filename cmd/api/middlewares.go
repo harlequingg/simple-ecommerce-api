@@ -65,16 +65,16 @@ func (app *Application) requirePermission(code string, next http.HandlerFunc) ht
 	return func(w http.ResponseWriter, r *http.Request) {
 		u := getUserFromRequest(r)
 		if u == nil {
-			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			writeServerError(w)
 			return
 		}
 		permissions, err := app.storage.GetUserPermissions(u.ID)
 		if err != nil {
-			writeError(errors.New("internal server error"), http.StatusInternalServerError, w)
+			writeServerError(w)
 			return
 		}
 		if !permissions.Has(code) {
-			writeError(errors.New("you don't have permission to access this resource"), http.StatusForbidden, w)
+			writeForbidden(w)
 			return
 		}
 		next.ServeHTTP(w, r)

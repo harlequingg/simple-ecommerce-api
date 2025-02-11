@@ -1071,7 +1071,6 @@ func (app *Application) updateOrderHandler(w http.ResponseWriter, r *http.Reques
 		writeError(errors.New("invalid operation order is already completed"), http.StatusConflict, w)
 		return
 	}
-	// TODO: we need to make sure user has permissions to update orders
 	op := *req.Operation
 	switch op {
 	case "deliver":
